@@ -12,7 +12,8 @@ pyAFQ's own outputs.
 | `..._desc-start_mask`, `_desc-end_mask` | the endpoint ROIs used (pyAFQ's `dist_to_atlas` applied) |
 | `..._desc-core_path.tsv`, `_desc-core.tck` | the bundle's core: the cross-section ridge path, 100 nodes |
 | `..._desc-summary.json` | settings, solve diagnostics, mass check |
-| `<sub>_desc-mpat_table.tsv` | per bundle: expected streamlines, columns, steps, Krylov products, time |
+| `<sub>_desc-mpat_table.tsv` | per bundle: expected streamlines, columns, backward and forward steps, time |
+| `<sub>_desc-trapped<pass><n>_map.nii.gz` | only when a solve stalls: where the walker mass it could not finish sits |
 | `<sub>_desc-mpat_dseg.nii.gz` | the tissue labels used: 1 WM, 2 GM, 3 CSF, 4 brain edge |
 | `<sub>_desc-chain_cache.npz` | the transition matrix, reused when the inputs and settings match |
 
@@ -24,8 +25,7 @@ Each bundle's `*_desc-summary.json` holds:
   one streamline.
 - `endpoint_mass_check`: the total endpoint mass divided by twice the expected streamlines.
   It should be 1.
-- `backward` and `forward`: iterations, final residual, and, if the Krylov tail ran, where it
-  started and how many products it took.
+- `backward` and `forward`: iterations, final residual, and whether the solve stalled.
 - `negative_mass_before_clip`: nonzero only with moments, whose linear closure can produce
   small negative masses (see {ref}`moments`).
 - `solved_with`: the other bundles that shared this bundle's passes.

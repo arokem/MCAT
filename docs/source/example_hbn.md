@@ -93,7 +93,7 @@ On this participant, with 8 threads:
 | white-matter voxels | 66,809 |
 | chain | 1,737,034 states (voxels × 26 direction classes), 94.9 million transitions, 1.0 GB, built in 19 s |
 | seeds | 23,801 interface voxels → 62,569 half-walk pairs (one streamline per seed, split over its fODF peaks) |
-| solves | 36 bundles in two groups of columns (`max_mem="32GB"` fits up to 191 columns per group); each group is one backward and one forward series, 126–149 steps to the $10^{-10}$ tolerance, with no Krylov tail needed |
+| solves | 36 bundles in two groups of columns (`max_mem="32GB"` fits up to 191 columns per group); each group is one backward and one forward series, 126–149 steps to the $10^{-10}$ tolerance |
 | time | 17.6 minutes for MPAT. The first run also downloads the data and computes pyAFQ's derivatives (DTI and CSD fits, registration): about 30 minutes in all |
 
 Every bundle's `endpoint_mass_check` is 1 to within $10^{-5}$ (the largest deviation, $7.5 \times 10^{-6}$, is for the bundle with the fewest expected streamlines, Callosum Temporal).

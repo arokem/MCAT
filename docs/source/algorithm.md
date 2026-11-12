@@ -200,10 +200,10 @@ once. It stops when the walker mass still in white matter falls below `tol` (def
 $10^{-10}$), relative to the starting mass. A typical bundle loses about 10% of its mass per
 step, which takes 300–500 steps.
 
-If the remaining mass decays so slowly that power iteration would need 500 or more further
-steps, or stalls (walkers circling in nearly all-white-matter volumes), the rest of the series
-is solved as one linear system with BiCGSTAB {cite}`vandervorst1992bicgstab`
-(`mpat.solve.solve_series`).
+If the remaining mass stops shrinking (it falls by less than 10% over 200 steps), the solve
+has **stalled**: walkers are circling in states they almost never leave, as in nearly
+all-white-matter volumes. A solve stops there, or after 5,000 steps, and reports where the
+unfinished mass sits (`mpat.solve.solve_series`).
 
 ```{animation} forward
 :name: fig-forward
@@ -400,6 +400,6 @@ and the stem's keeps the vertical one.
 - **Mass balance.** Each bundle's `*_desc-summary.json` reports `endpoint_mass_check`, which
   should be 1.
 - **Clipping.** It also reports `negative_mass_before_clip`, which is nonzero only with
-  moments, and the iterations, Krylov products and final residual of both passes.
+  moments, and the iterations, final residual and stall flag of both passes.
 
 Works cited on this page are listed in {doc}`references`.

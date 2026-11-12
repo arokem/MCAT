@@ -23,11 +23,11 @@ result.
 **`tol`.** A typical bundle loses about 10% of its walker mass per step, so $10^{-10}$ takes
 300–500 steps.
 
-**Solves that crawl** switch to a Krylov solver automatically; there is no setting for it.
-When nearly everything is walkable (all white matter, say), walkers circle for thousands of
-steps. Once power iteration would need 500 or more further steps, or stalls, the rest of the
-series is solved with BiCGSTAB. Each bundle's summary reports the step at which this happened
-and the number of products it took.
+**Solves that stall** stop early. When nearly everything is walkable (all white matter, say),
+walkers circle for thousands of steps. If the remaining mass falls by less than 10% over 200
+steps, or a solve reaches 5,000 steps, `mpat.run` stops it, logs a warning, and writes a map of
+where the unfinished mass sits (`*_desc-trapped*_map.nii.gz`). Each bundle's summary records
+whether its solves stalled.
 
 **`double_odf`.** doubleODF weights each hop by how well the next voxel's fODF supports it
 (similar to iFOD2). singleODF follows the current voxel's fODF only, like pyAFQ's first-order

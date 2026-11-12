@@ -55,7 +55,7 @@ mpat dwi.nii.gz dwi.bval dwi.bvec T2w.nii.gz out/ --n-proc 12 --max-mem 16GB \
                        bundle_info=abd.baby_bd(), pve="babyseg", brain_mask_definition=BabyBrainMask())'
 ```
 
-**Solves that crawl** switch to a Krylov solver automatically, with no setting. A normal bundle loses about 10% of its walker mass per step, so 1e-10 takes 300–500 steps and Krylov never triggers. When nearly everything is walkable (ie, all-WM), walkers circle for thousands of steps. Once power iteration would need 500 or more further steps, or stalls, the rest of the series is solved with BiCGSTAB.
+**Solves that stall** stop early. When nearly everything is walkable (ie, all-WM), walkers circle for thousands of steps. If the remaining mass falls by less than 10% over 200 steps, or a solve reaches 5,000 steps, it stops, logs a warning, and writes a map of where the unfinished mass sits (`*_desc-trapped*_map.nii.gz`).
 
 ## Outputs (`<output_dir>/mpat/`, or `mpat-moments/`)
 
@@ -68,7 +68,7 @@ mpat dwi.nii.gz dwi.bval dwi.bvec T2w.nii.gz out/ --n-proc 12 --max-mem 16GB \
 | `..._desc-start_mask`, `_desc-end_mask` | the endpoint ROIs used (pyAFQ's `dist_to_atlas` applied) |
 | `..._desc-core_path.tsv`, `_desc-core.tck` | the bundle's core: the cross-section ridge path, 100 nodes |
 | `..._desc-summary.json` | settings, solve diagnostics, mass check |
-| `<sub>_desc-mpat_table.tsv` | per bundle: expected streamlines, columns, steps, Krylov products, time |
+| `<sub>_desc-mpat_table.tsv` | per bundle: expected streamlines, columns, backward and forward steps, time |
 | `<sub>_desc-mpat_dseg.nii.gz` | the tissue labels used: 1 WM, 2 GM, 3 CSF, 4 brain edge |
 | `<sub>_desc-mpat_collage.png` | every bundle's density as sagittal, coronal and axial maximum-intensity projections, log scale (`viz`) |
 | `<sub>_desc-mpat_view.html` | viewer page with every bundle: densities and cores (`viz`) |
