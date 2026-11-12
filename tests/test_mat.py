@@ -1,5 +1,6 @@
-"""MAT: geometry, chain, bundle solves (against walkers sampled from the same chain), the
-Krylov tail, grouping, cores, the viewer, and an offline end-to-end run through pyAFQ."""
+"""MPAT: geometry, chain, bundle solves (against walkers sampled from the same chain), power
+iteration and its stall check, grouping, cores, the viewer, and an offline end-to-end run
+through pyAFQ."""
 import nibabel as nib
 import numpy as np
 import pytest
@@ -7,10 +8,10 @@ from numba import njit
 from phantoms import crossing_phantom
 from scipy import ndimage
 
-from mat import kernel as K
-from mat.chain import Chain, ChainConfig
-from mat.geometry import build_geometry
-from mat.solve import prepare_launches, segment_bundles, solve_series
+from mpat import kernel as K
+from mpat.chain import Chain, ChainConfig
+from mpat.geometry import build_geometry
+from mpat.solve import prepare_launches, segment_bundles, solve_series
 
 
 # ------------------------------------------------------------------ fixtures
@@ -52,7 +53,7 @@ def test_visitation_odf():
     from dipy.core.sphere import Sphere
     from dipy.reconst.shm import sh_to_sf_matrix
 
-    from mat.geometry import OFFSETS, visitation_odf
+    from mpat.geometry import OFFSETS, visitation_odf
 
     g = build_geometry((2.0, 2.0, 2.0), 35.0)
     V = g.vertices
@@ -207,30 +208,7 @@ def test_grouped_equals_separate_and_moments(crossing):
     assert 0.5 < e < 2
 
 
-# ------------------------------------------------------------------ Krylov tail
-def _sticky_chain(n=60, loops=((20, 0.9995), (40, 0.999))):
-    """Transport down a line with near-closed 2-cycles hanging off it (A[to, from])."""
-    N = n + 2 * len(loops)
-    A = np.zeros((N, N))
-    for j in range(n - 1):
-        A[j + 1, j] = 0.97
-    for k, (at, p) in enumerate(loops):
-        a, b = n + 2 * k, n + 2 * k + 1
-        A[at + 1, at], A[a, at], A[b, a], A[a, b], A[at + 1, b] = 0.5, 0.47, p, p, 1 - p - 1e-5
-    return A
-
-
-def test_krylov_tail_where_power_crawls():
-    A = _sticky_chain()
-    x0 = np.zeros((A.shape[0], 2))
-    x0[0, 0], x0[10, 1] = 1.0, 2.0
-    exact = np.linalg.solve(np.eye(len(A)) - A, x0)
-    tot, info = solve_series(lambda x, o: np.copyto(o, A @ x), x0.copy(), np.ones_like(x0), 1e-10,
-                             100000, "test")
-    assert info["tail_started_at"] < 300 and info["tail_products"] < 1500 and not info["stalled"]
-    assert np.abs(tot - exact).max() < 1e-8 * exact.max()
-
-
+# ------------------------------------------------------------------ power iteration
 def test_closed_loop_stalls_cleanly():
     A = np.array([[0.0, 0.0, 0.0], [0.01, 0.0, 1.0], [0.0, 1.0, 0.0]])
     tot, info = solve_series(lambda x, o: np.copyto(o, A @ x), np.array([[1.0], [0.0], [0.0]]),
@@ -238,14 +216,13 @@ def test_closed_loop_stalls_cleanly():
     assert info["stalled"] and np.isfinite(tot).all() and tot.max() < 1e3
 
 
-def test_fast_decay_never_switches():
+def test_fast_decay_converges():
     rng = np.random.default_rng(3)
     A = rng.random((40, 40))
     A *= 0.9 / A.sum(0)
     x0 = rng.random((40, 2))
     tot, info = solve_series(lambda x, o: np.copyto(o, A @ x), x0.copy(), np.ones_like(x0), 1e-12,
                              5000, "test")
-    assert "tail_started_at" not in info
     assert np.abs(tot - np.linalg.solve(np.eye(40) - A, x0)).max() < 1e-9
 
 
@@ -254,11 +231,11 @@ def test_pyafq_end_to_end(tmp_path):
     pytest.importorskip("AFQ")
     from synthetic_subject import make_afq, make_subject
 
-    import mat
+    import mpat
 
     f = make_subject(tmp_path / "raw")
-    res = mat.run(make_afq(f, tmp_path / "afq"), n_proc=2, max_mem="2GB")
-    out = tmp_path / "afq" / "mat"
+    res = mpat.run(make_afq(f, tmp_path / "afq"), n_proc=2, max_mem="2GB")
+    out = tmp_path / "afq" / "mpat"
     for b, own in (("A", f["A"]), ("B", f["B"])):
         assert res[b].info["expected_bundle_streamlines"] > 10
         d = nib.load(out / f"sub-01_bundle-{b}_desc-density_map.nii.gz").get_fdata()
@@ -266,7 +243,7 @@ def test_pyafq_end_to_end(tmp_path):
         assert (out / f"sub-01_bundle-{b}_desc-core.tck").exists()
         # visitation ODF: integrates to the density, points along the bundle (A: x, B: y),
         # including where the two bundles cross
-        from mat.geometry import _sh_basis
+        from mpat.geometry import _sh_basis
 
         odf = nib.load(out / f"sub-01_bundle-{b}_desc-visitodf_dwimap.nii.gz").get_fdata()
         m = d > 1e-2 * d.max()
@@ -275,14 +252,16 @@ def test_pyafq_end_to_end(tmp_path):
         sf = odf[m & f["A"] & f["B"]] @ _sh_basis(np.r_[u, -u], odf.shape[-1])
         axis = 0 if b == "A" else 1
         assert (np.argmax(sf[:, :3], 1) == axis).all() and (sf[:, 1 - axis] < 0.05 * sf[:, axis]).all()
-    assert (out / "sub-01_desc-mat_table.tsv").exists()
+    assert (out / "sub-01_desc-mpat_table.tsv").exists()
     pytest.importorskip("ipyniivue")
-    nv = mat.view(out, glyphs=["A"])
-    assert [m.name for m in nv.meshes] == ["A_core.obj", "B_core.obj", "A_glyphs.mz3"]
+    nv = mpat.view(out, glyphs=["A"])
+    # each bundle as a surface (isosurface=True, the default) and its core as a tube
+    assert [m.name for m in nv.meshes] == ["A_surface.mz3", "A_core.obj", "B_surface.mz3", "B_core.obj",
+                                           "A_glyphs.mz3"]
     assert nv.scene.crosshair_pos != [0.5, 0.5, 0.5]
     # glyphs follow the slices: every voxel >= 1e-2 of the peak is available, the three
     # slices through the crosshair are meshed
-    from mat.viewer import glyph_mesh, save_html, scene
+    from mpat.viewer import glyph_mesh, save_html, scene
 
     S = scene(out, glyphs=True)
     g = S["glyphs"][0]
@@ -291,5 +270,6 @@ def test_pyafq_end_to_end(tmp_path):
     c = tuple(g["ijk"][0])
     assert glyph_mesh(g, S["affine"], c) is not None and glyph_mesh(g, S["affine"], (-1, -1, -1)) is None
     page = save_html(tmp_path / "view.html", out, glyphs=True)
-    html = open(page).read()
+    with open(page) as fh:
+        html = fh.read()
     assert '"role": "glyphs"' in html and "followGlyphs" in html and "cdn.jsdelivr.net/npm/@niivue/niivue@" in html

@@ -33,3 +33,16 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 mpat = ["viewer.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Any warning fails the tests, except these two from third-party code:
+filterwarnings = [
+    "error",
+    # MPAT evaluates fODFs in DIPY's legacy descoteaux07 basis on purpose: it is the basis
+    # pyAFQ writes them in.  DIPY announces that basis's future deprecation on every use.
+    "ignore:The legacy descoteaux07 SH basis:PendingDeprecationWarning",
+    # scikit-image's marching cubes (the viewer's isosurfaces) sets ndarray.shape, which
+    # NumPy 2.5 deprecates; a scikit-image issue, not MPAT's.
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning:skimage",
+]

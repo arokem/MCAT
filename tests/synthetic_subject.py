@@ -53,7 +53,7 @@ def make_subject(root, shape=(22, 22, 10), vox=2.0, seed=0):
     np.savetxt(root / "sub-01_dwi.bvec", bvecs.T, fmt="%.6f")
     files["bval"], files["bvec"] = str(root / "sub-01_dwi.bval"), str(root / "sub-01_dwi.bvec")
     # anatomy on a 2x finer grid, as a T1 usually is: the PVE then has to be resampled to the
-    # DWI grid (pyAFQ's tracker resamples it linearly; so does MAT)
+    # DWI grid (pyAFQ's tracker resamples it linearly; so does MPAT)
     up = lambda a: np.repeat(np.repeat(np.repeat(a, 2, 0), 2, 1), 2, 2)  # noqa: E731
     aff_t1 = np.diag([vox / 2, vox / 2, vox / 2, 1.0])
     aff_t1[:3, 3] = aff[:3, 3] - vox / 4

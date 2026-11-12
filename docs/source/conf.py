@@ -1,11 +1,17 @@
 """Sphinx configuration for the MPAT documentation (MyST Markdown)."""
+import sys
 from pathlib import Path
 
 # docs/
-#   source/      the pages (MyST Markdown) and conf.py
-#   build/       everything generated (html/, ...)
+#   source/      these pages, conf.py, references.bib
+#   static/      hand-written assets (CSS)
+#   _ext/        the mpat_animations extension
+#   animations/  scripts that render the figures and animations
+#   build/       everything generated: html/, generated/ (rendered media), cache/
 HERE = Path(__file__).resolve().parent
 DOCS = HERE.parent
+GENERATED = DOCS / "build" / "generated"
+sys.path.insert(0, str(DOCS / "_ext"))
 
 project = "MPAT"
 author = "The MPAT developers"
@@ -18,21 +24,108 @@ except Exception:  # pragma: no cover
     release = "0.1.0"
 version = release
 
-extensions = ["myst_parser"]
+extensions = [
+    "myst_parser",
+    "sphinx.ext.autodoc",
+    "sphinx.ext.autosummary",
+    "sphinx.ext.napoleon",
+    "sphinx.ext.intersphinx",
+    "sphinx.ext.viewcode",
+    "sphinx.ext.mathjax",
+    "sphinx_design",
+    "sphinx_copybutton",
+    "sphinxcontrib.bibtex",
+    "sphinxcontrib.programoutput",
+    "mpat_animations",
+]
 
-source_suffix = {".md": "markdown"}
+source_suffix = {".md": "markdown", ".rst": "restructuredtext"}
 root_doc = "index"
 exclude_patterns = ["Thumbs.db", ".DS_Store"]
 
-myst_enable_extensions = ["dollarmath", "colon_fence", "deflist"]
+# ------------------------------------------------------------------ MyST
+myst_enable_extensions = ["dollarmath", "amsmath", "colon_fence", "deflist", "attrs_block",
+                          "attrs_inline", "substitution"]
 myst_heading_anchors = 3
+myst_dmath_double_inline = True
 
+numfig = True
+numfig_format = {"figure": "Figure %s"}
+
+# ------------------------------------------------------------------ API docs
+autosummary_generate = True
+autodoc_default_options = {"members": True, "undoc-members": False, "show-inheritance": False}
+autodoc_member_order = "bysource"
+autodoc_typehints = "none"
+napoleon_numpy_docstring = True
+napoleon_google_docstring = False
+
+intersphinx_mapping = {
+    "python": ("https://docs.python.org/3", None),
+    "numpy": ("https://numpy.org/doc/stable/", None),
+    "scipy": ("https://docs.scipy.org/doc/scipy/", None),
+    "nibabel": ("https://nipy.org/nibabel/", None),
+    "dipy": ("https://docs.dipy.org/stable/", None),
+}
+
+bibtex_bibfiles = ["references.bib"]
+bibtex_default_style = "plain"
+bibtex_reference_style = "author_year"
+
+# ------------------------------------------------------------------ HTML
 html_theme = "pydata_sphinx_theme"
 html_title = "MPAT"
+GENERATED.mkdir(parents=True, exist_ok=True)   # filled by the mpat_animations extension
+html_static_path = [str(DOCS / "static"), str(GENERATED)]
+html_css_files = ["mpat.css"]
 html_theme_options = {
-    "github_url": "https://github.com/rokemlab/MPAT",
+    "github_url": "https://github.com/36000/MPAT",
     "navigation_with_keys": True,
+    "show_toc_level": 2,
+    "secondary_sidebar_items": ["page-toc"],
+    "footer_start": ["copyright"],
+    "footer_end": ["sphinx-version"],
 }
 html_context = {"default_mode": "light"}
-html_sidebars = {"**": []}
+html_sidebars = {"**": []}          # navigation lives in the header; pages use the full width
 html_show_sourcelink = False
+
+linkcheck_ignore = [r"https://github\.com/36000/MPAT.*"]
+
+# ------------------------------------------------------------------ build environment
+import os  # noqa: E402
+
+# the `mpat` console script lives next to the interpreter running Sphinx (virtualenvs)
+os.environ["PATH"] = os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", "")
+
+# ------------------------------------------------------------------ docstrings
+# MPAT's docstrings use plain aligned "name    description" blocks rather than numpydoc.
+# Keep them as written: such blocks are shown as preformatted text.
+import re  # noqa: E402
+
+_ROW = re.compile(r"^\s*[\w*][\w, *.=()\[\]'\"-]*\s{2,}\S")
+
+
+def _plain_blocks(app, what, name, obj, options, lines):
+    out, i = [], 0
+    while i < len(lines):
+        if _ROW.match(lines[i]):
+            j = i
+            block = []
+            while j < len(lines) and lines[j].strip() and (
+                    _ROW.match(lines[j]) or (block and lines[j].startswith(" ") and
+                                            len(lines[j]) - len(lines[j].lstrip()) > 0)):
+                block.append(lines[j])
+                j += 1
+            if out and out[-1].strip():
+                out.append("")
+            out += ["::", ""] + ["    " + b for b in block] + [""]
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    lines[:] = out
+
+
+def setup(app):
+    app.connect("autodoc-process-docstring", _plain_blocks)
