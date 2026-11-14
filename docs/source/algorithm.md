@@ -266,7 +266,8 @@ gives the bundle's density.
 ## 10. ROIs
 
 pyAFQ's bundle definitions are turned into requirements on the two halves of a streamline
-(`mpat.afq.bundle_specs`).
+(`mpat.afq.bundle_specs`). What each kind of ROI means in practice, and MPAT's additions to
+pyAFQ's definitions, are in {doc}`bundles`.
 
 **Exclude ROIs** make states *taboo*. A walker that enters a taboo voxel is removed from the
 column; in the solves, that is a diagonal mask $M$:

@@ -28,8 +28,6 @@
 .. autoclass:: mpat.solve.Launches
 
 .. autofunction:: mpat.solve.solve_series
-
-.. autofunction:: mpat.solve.bicgstab
 ```
 
 ## Geometry
