@@ -56,16 +56,97 @@ class Clock:
 
 
 STALL_WINDOW, STALL_RATIO = 200, 0.9   # stalled: remaining mass fell < 10% in 200 steps
+TAIL_MIN_STEPS = 30        # power steps before the Krylov tail may take over (walkers in transit)
+TAIL_SWITCH_AFTER = 500    # ... when power iteration would still need more steps than this
+TAIL_MAX_PRODUCTS = 3000   # for the whole Krylov tail, all rounds together
+TAIL_ROUNDS = 4            # Krylov rounds on what the previous one left, before power iteration
 FLOAT_BLOCKS_PER_COLUMN = 6    # float64 arrays per solution column at the peak
 OVERLENGTH_SURVIVAL = 0.5      # states where more walkers than this outlast the soft max length
 
 
-def solve_series(mul, x0, mask, tol, max_iter, what, ncomp=1, verbose=False):
+# ------------------------------------------------------------------ Krylov tail
+def _cdot(a, b):
+    return np.einsum("ij,ij->j", a, b)
+
+
+def bicgstab(apply, b, tol_abs, rows, max_mv=TAIL_MAX_PRODUCTS, restart=50):
+    """BiCGSTAB on every column of b in lockstep (one product per half-step shared by all
+    columns).  Converged columns are frozen; a column whose residual has not halved in
+    ``restart`` iterations restarts.  Returns (x, products, residual 1-norm over ``rows``)."""
+    k = b.shape[1]
+    x, r, rh = np.zeros_like(b), b.copy(), b.copy()
+    p, v, t = np.zeros_like(b), np.zeros_like(b), np.empty_like(b)
+    rho, alpha, omega = np.ones(k), np.ones(k), np.ones(k)
+    res = np.abs(r[rows]).sum(0)
+    done = res <= tol_abs
+    checkpoint = res.copy()
+    mv = 0
+
+    def div(a, d):
+        ok = (d != 0) & ~done
+        return np.where(ok, a / np.where(d != 0, d, 1.0), 0.0)
+
+    while not done.all() and mv < max_mv:
+        rho_new = _cdot(rh, r)
+        beta = div(rho_new, rho) * div(alpha, omega)
+        p *= beta
+        p -= v * (beta * omega)
+        p += r
+        apply(p, v)
+        alpha = div(rho_new, _cdot(rh, v))
+        r -= v * alpha
+        x += p * alpha
+        apply(r, t)
+        mv += 2
+        omega = div(_cdot(t, r), _cdot(t, t))
+        x += r * omega
+        r -= t * omega
+        rho = np.where(done, rho, rho_new)
+        res = np.abs(r[rows]).sum(0)
+        if not np.isfinite(res).all():
+            break
+        stuck = (alpha == 0) & (omega == 0) & ~done
+        if (mv // 2) % restart == 0:
+            stuck |= ~done & (res > 0.5 * checkpoint)
+            checkpoint = res.copy()
+        if stuck.any():
+            rh[:, stuck], p[:, stuck], v[:, stuck] = r[:, stuck], 0.0, 0.0
+            rho[stuck] = alpha[stuck] = omega[stuck] = 1.0
+        done |= res <= tol_abs
+    return x, mv, res
+
+
+def _bicgstab_cols(apply, b, tol_abs, rows, cols, ncols, max_mv=TAIL_MAX_PRODUCTS):
+    """bicgstab on columns ``cols`` of an operator ``apply`` that works on all ``ncols``
+    columns (the others zero; the operator acts column by column)."""
+    def sub(X, out):
+        full = np.zeros((X.shape[0], ncols))
+        full[:, cols] = X
+        res = np.empty_like(full)
+        apply(full, res)
+        out[...] = res[:, cols]
+
+    return bicgstab(sub, b, tol_abs, rows, max_mv=max_mv)
+
+
+def _crawling(hist, it, tol, window=10):
+    """The remaining mass decays geometrically and power iteration would still need more
+    than TAIL_SWITCH_AFTER steps to reach ``tol``."""
+    if it < TAIL_MIN_STEPS or it % window or len(hist) < 2 * window + 1 or hist[-1] <= 0:
+        return False
+    q1 = (hist[-1] / hist[-1 - window]) ** (1.0 / window)
+    q0 = (hist[-1 - window] / hist[-1 - 2 * window]) ** (1.0 / window)
+    return 0 < q1 < 1 and abs(q1 - q0) < 0.02 and np.log(tol / hist[-1]) / np.log(q1) > TAIL_SWITCH_AFTER
+
+
+def solve_series(mul, x0, mask, tol, max_iter, what, ncomp=1, verbose=False, accel=False, krylov=True):
     """total = sum_t (M A)^t x0 per column (M = diag(mask)), A x = mul(x, out), by power
     iteration until the remaining mass (mass rows, relative to the largest column's start) is
     below ``tol``.  Stops early when it stalls (mass circulating in states that almost never
     get absorbed) and reports where that mass sits as ``info["trapped"]``.  ``x0`` is consumed.
     ``verbose``: log the time per step (matrix product / masking and summing) every 100 steps.
+    ``accel``: False (default), True / "mr" (invariant-preserving Periodic Minimal Residual
+    extrapolation), or "aitken" (scalar Aitken delta-squared extrapolation).
     Returns (total, info)."""
     t_start = time.perf_counter()
     t_mul = t_acc = 0.0
@@ -75,19 +156,49 @@ def solve_series(mul, x0, mask, tol, max_iter, what, ncomp=1, verbose=False):
     mask = np.ascontiguousarray(mask)
     rows = slice(None, None, ncomp)
     scale = max(np.abs(x0[rows]).sum(0).max(), 1e-300)
-    info = dict(iterations=0, residual=0.0, stalled=False)
-    ref = None
+    use_accel = (accel is not False and accel is not None)
+    accel_kind = "mr" if accel is True else str(accel)
+    burn_in, period, omega_max = 25, 8, 25.0
+    info = dict(iterations=0, residual=0.0, stalled=False, extrapolated_jumps=0)
+    hist, ref, tried = [], None, (not krylov) or use_accel
     for it in range(1, max_iter + 1):
         t0 = time.perf_counter()
         mul(term, nxt)
         t1 = time.perf_counter()
-        res = float(K.mask_accumulate(nxt, mask, total, ncomp).max()) / scale
+        do_extrap = use_accel and (it >= burn_in and (it - burn_in) % period == 0)
+        if not do_extrap:
+            res = float(K.mask_accumulate(nxt, mask, total, ncomp).max()) / scale
+        else:
+            stats = K._step_stats(term, nxt, mask, ncomp)
+            u1, w1, uu, uw, ww = stats[:, 0], stats[:, 1], stats[:, 2], stats[:, 3], stats[:, 4]
+            res = float(w1.max()) / scale
+            C = x0.shape[1]
+            omega = np.ones(C)
+            if res >= tol:
+                for c in range(C):
+                    if w1[c] / scale < tol:
+                        continue
+                    if accel_kind == "mr":
+                        rr = uu[c] - 2.0 * uw[c] + ww[c]
+                        ur = uw[c] - uu[c]
+                        if rr > 1e-300 and ur < 0.0:
+                            om = 1.0 - ur / rr
+                            if om > 1.05:
+                                omega[c] = min(om, omega_max)
+                    elif accel_kind == "aitken":
+                        if u1[c] > 1e-300 and 0.1 * u1[c] < w1[c] < 0.9999 * u1[c]:
+                            lam = w1[c] / u1[c]
+                            omega[c] = min(1.0 / (1.0 - lam), omega_max)
+            res = float(K._extrapolate_accumulate(term, nxt, total, omega, ncomp).max()) / scale
+            if np.any(omega > 1.05):
+                info["extrapolated_jumps"] += 1
         t2 = time.perf_counter()
         t_mul += t1 - t0
         t_acc += t2 - t1
         w_mul += t1 - t0
         w_acc += t2 - t1
         term, nxt = nxt, term
+        hist.append(res)
         info.update(iterations=it, residual=res)
         if it % 100 == 0:
             log.info("  %s step %d: remaining mass %.2e", what, it, res)
@@ -100,13 +211,82 @@ def solve_series(mul, x0, mask, tol, max_iter, what, ncomp=1, verbose=False):
             break
         if not np.isfinite(res) or res > 1e6:
             raise RuntimeError(f"{what} solve diverges (remaining mass {res:.1e} after {it} steps)")
+        stall = False
         if it % STALL_WINDOW == 0:
-            if ref is not None and res > STALL_RATIO * ref:
-                info["stalled"] = True
-                log.warning("%s solve stalled at step %d: remaining mass %.2e circulates in states "
-                            "that (almost) never get absorbed; stopping here", what, it, res)
-                break
+            stall = ref is not None and res > STALL_RATIO * ref
             ref = res
+        if not tried and (stall or _crawling(hist, it, tol)):
+            tried = True
+            tol_abs = tol * scale
+            act = np.flatnonzero(np.abs(term[rows]).sum(0) > tol_abs)
+            tmp = np.empty((term.shape[0], act.size))
+            msk = np.ascontiguousarray(mask[:, act])
+
+            def apply(X, out):
+                mul(np.ascontiguousarray(X), tmp)
+                tmp[...] *= msk
+                np.subtract(X, tmp, out=out)
+
+            log.info("  %s: switching to the Krylov tail at step %d (remaining mass %.1e, %s; %d columns)",
+                     what, it, res, "stalled" if stall else "decaying too slowly for power iteration", act.size)
+            t0_k = time.time()
+            pending = np.ascontiguousarray(term[:, act])
+            added = np.ones(act.size, bool)
+            live = np.ones(act.size, bool)
+            mv_all, rounds = 0, 0
+            resid = np.empty_like(pending)
+            for rounds in range(1, TAIL_ROUNDS + 1):
+                cols = np.flatnonzero(live)
+                budget = TAIL_MAX_PRODUCTS - mv_all
+                if not cols.size or budget < 2:
+                    break
+                every = cols.size == act.size
+                b = pending if every else np.ascontiguousarray(pending[:, cols])
+                r0 = np.abs(b[rows]).sum(0)
+                y, mv, _ = bicgstab(apply, b, tol_abs, rows, max_mv=budget) if every else \
+                    _bicgstab_cols(apply, b, tol_abs, rows, cols, act.size, max_mv=budget)
+                mv_all += mv
+                if every:
+                    apply(y, resid)
+                    np.subtract(b, resid, out=resid)
+                    r = resid
+                else:
+                    full = np.zeros_like(pending)
+                    full[:, cols] = y
+                    apply(full, resid)
+                    del full
+                    r = b - resid[:, cols]
+                r1 = np.abs(r[rows]).sum(0)
+                ok = np.isfinite(r1) & (r1 < 0.5 * r0)
+                acc = cols[ok]
+                total[:, act[acc]] += y[:, ok] - np.where(added[acc], 1.0, 0.0) * b[:, ok]
+                del y
+                pending[:, acc] = r[:, ok]
+                added[acc] = False
+                live[cols[~ok]] = False
+                live[acc[r1[ok] <= tol_abs]] = False
+                del r
+            del tmp, resid
+            add = ~added
+            total[:, act[add]] += pending[:, add]
+            term[:, act] = pending
+            left = np.abs(term[rows]).sum(0)
+            res = float(left.max()) / scale
+            info.update(tail_started_at=it, tail_products=int(mv_all), tail_rounds=rounds, residual=res,
+                        tail_seconds=round(time.time() - t0_k, 1))
+            log.info("  %s: Krylov tail from step %d, %d products in %d round(s), remaining %.1e (%.0fs)",
+                     what, it, mv_all, rounds, res, time.time() - t0_k)
+            if res < tol:
+                break
+            n_left = int((left[act] > tol_abs).sum())
+            log.info("  %s: %d of %d columns above tol after the Krylov tail continue with power "
+                     "iteration", what, n_left, act.size)
+            stall = False
+        if stall:
+            info["stalled"] = True
+            log.warning("%s solve stalled at step %d: remaining mass %.2e circulates in states "
+                        "that (almost) never get absorbed; stopping here", what, it, res)
+            break
     if info["residual"] >= tol:     # stalled or max_iter reached
         info["trapped"] = np.abs(term[rows]).sum(1).astype(np.float32) / scale
     n = max(info["iterations"], 1)
@@ -184,8 +364,16 @@ def prepare_launches(chain, seeds, chunk=4096):
         n = min(P, s0 + chunk) - s0
         o = np.empty((2 * n, 26, nb, nc))
         d = np.empty(2 * n)
-        chain.launch_halves(seed_lin[pair_seed[s0:s0 + n]], np.arange(0, 2 * n + 1, 2, dtype=np.int64),
-                            pair_d[s0:s0 + n].reshape(-1), o, d)
+        v_chunk = seed_lin[pair_seed[s0:s0 + n]]
+        if n > 0:
+            chg = np.flatnonzero(v_chunk[1:] != v_chunk[:-1]) + 1
+            starts = np.concatenate([[0], chg])
+            u_vlin = v_chunk[starts]
+            dptr = 2 * np.concatenate([starts, [n]]).astype(np.int64)
+        else:
+            u_vlin = np.zeros(0, np.int64)
+            dptr = np.zeros(1, np.int64)
+        chain.launch_halves(u_vlin, dptr, pair_d[s0:s0 + n].reshape(-1), o, d)
         hh, nn, bb = np.nonzero(np.any(o != 0, axis=-1))
         counts[2 * s0:2 * (s0 + n)] = np.bincount(hh, minlength=2 * n)
         keys.append((nn * nb + bb).astype(np.int16))
@@ -210,21 +398,30 @@ class BundleResult:
     endpoints_a: np.ndarray  # (Na,) expected bundle endpoints per absorbing voxel
     info: dict = field(default_factory=dict)
     density_class: np.ndarray = None  # (Nt, 26) the visits split by the walker's direction class
+    fields: object = None    # mpat.fields.BundleFields when solved with keep_fields=True
+    flux26: np.ndarray = None        # (Nt, 26) expected steps to each of 26 neighbours (when ncomp == 1)
+    start_mask: np.ndarray = None    # optional start ROI mask on the chain grid
+    end_mask: np.ndarray = None      # optional end ROI mask on the chain grid
 
 
 def _endpoint_kinds(a_valid, a_start, a_end):
-    """End categories per half and the bilinear form M: P(both ends acceptable) =
-    sum_kl M[k, l] V_k(h1) V_l(h2)."""
+    """Disjoint end categories per half and the non-negative bilinear form M >= 0:
+    P(both ends acceptable) = sum_kl M[k, l] V_k(h1) V_l(h2)."""
     if a_start is None and a_end is None:
         return [a_valid], np.array([[1.0]]), "both ends valid"
     if a_start is None or a_end is None:
-        E = a_end if a_end is not None else a_start
-        return [a_valid, a_valid & ~E], np.diag([1.0, -1.0]), "one end in the endpoint ROI"
+        E = a_valid & (a_end if a_end is not None else a_start)
+        R = a_valid & ~E
+        return [E, R], np.array([[1.0, 1.0], [1.0, 0.0]]), "one end in the endpoint ROI"
     S, E = a_valid & a_start, a_valid & a_end
     if not (S & E).any():
         return [S, E], np.array([[0.0, 1.0], [1.0, 0.0]]), "one end in start, the other in end"
-    return [S, E, S & E], np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]]), \
-        "one end in start, the other in end"
+    B = S & E
+    return [S & ~B, E & ~B, B], np.array([
+        [0.0, 1.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0],
+    ]), "one end in start, the other in end"
 
 
 class _Plan:
@@ -232,6 +429,8 @@ class _Plan:
 
     def __init__(self, chain, spec, valid_classes):
         self.name, self.t0 = spec["name"], time.time()
+        self.start_mask = spec.get("start")
+        self.end_mask = spec.get("end")
         pad = np.zeros(chain.pshape, bool)
 
         def padded(m):
@@ -282,12 +481,13 @@ def _trapped(chain, info, what, names, on_trapped):
     on_trapped(what, names, vol)
 
 
-def _solve(chain, x0, mask, tol, max_iter, what, verbose=False):
+def _solve(chain, x0, mask, tol, max_iter, what, verbose=False, accel=False):
     mul = chain.mul_forward if what == "forward" else chain.mul_backward
-    return solve_series(mul, x0, mask, tol, max_iter, what, chain.ncomp, verbose)
+    return solve_series(mul, x0, mask, tol, max_iter, what, chain.ncomp, verbose, accel=accel, krylov=False)
 
 
-def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, verbose=False, clock=None):
+def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, verbose=False, clock=None,
+                 keep_fields=False, accel=False, arc_length=False, zooms=None):
     t0 = time.time()
     gclock = Clock()
     nb, Ns, nc = chain.nb, chain.n_states, chain.ncomp
@@ -302,7 +502,7 @@ def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, ver
         r = np.concatenate([chain.absorb_rhs(p.absw) for p in plans], axis=1)
         r *= mask
     with gclock("backward solve"):
-        beta, info_b = _solve(chain, r, mask, tol, max_iter, "backward", verbose)
+        beta, info_b = _solve(chain, r, mask, tol, max_iter, "backward", verbose, accel=accel)
     with gclock("trapped maps"):
         _trapped(chain, info_b, "backward", names, on_trapped)
     del r
@@ -329,8 +529,9 @@ def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, ver
     if getattr(chain, "kill", None) is not None:
         pi0[np.repeat(chain.kill, nc)] = 0.0
     gclock.add("seed weights (forward start)", time.perf_counter() - t_init)
+    launch = pi0.copy() if keep_fields else None   # solve_series consumes pi0
     with gclock("forward solve"):
-        S, info_f = _solve(chain, pi0, mask, tol, max_iter, "forward", verbose)
+        S, info_f = _solve(chain, pi0, mask, tol, max_iter, "forward", verbose, accel=accel)
     with gclock("trapped maps"):
         _trapped(chain, info_f, "forward", names, on_trapped)
     del pi0, mask
@@ -339,6 +540,11 @@ def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, ver
     ti = chain.tindex[L.seed_lin]
     pt = ti[L.pair_seed]
     on = pt >= 0
+    chord_w = None
+    if arc_length:
+        from .geometry import class_chord_lengths
+
+        chord_w = class_chord_lengths(chain.geo, zooms)
     for p, o0, o1, (a0, seed_prob, pb) in zip(plans, offs[:-1], offs[1:], starts):
         colsign = p.signs[p.xcol]
         S_p = np.ascontiguousarray(S[:, o0:o1])
@@ -348,6 +554,8 @@ def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, ver
         w0 = 0.5 * (L.pair_w * pb)[on]
         for k in (0, 1):
             np.add.at(dcls, (pt[on], chain.geo.vbin[L.pair_d[on, k]]), w0)
+        if chord_w is not None:
+            dcls = dcls * chord_w[None, :]
         density = dcls.sum(1)
         endpoints = ((a0 + chain.absorbed_from(S_p)) * p.absw) @ colsign
         info = dict(n_seeds=int(len(L.seeds)), n_streamlines=int(P),
@@ -358,8 +566,20 @@ def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, ver
                     negative_mass_before_clip=dict(density=float(-density[density < 0].sum()),
                                                    seed_prob=float(-seed_prob[seed_prob < 0].sum())),
                     seconds=round(time.time() - p.t0, 1))
+        flux26 = None
+        if nc == 1:
+            f26 = np.empty((chain.t_lin.size, 26), np.float64)
+            K.stencil_flux(chain.Q_ptr, chain.Q_slot, chain.Q_w, chain.tmpl_n, chain.tmpl_b, chain.nbr_t,
+                           chain.nb, S_p, np.ascontiguousarray(beta[:, o0:o1]), colsign, f26)
+            flux26 = np.clip(f26, 0, None).astype(np.float32)
         res = BundleResult(p.name, L.seeds, np.clip(seed_prob, 0, None), np.clip(density, 0, None),
-                           np.clip(endpoints, 0, None), info, np.clip(dcls, 0, None).astype(np.float32))
+                           np.clip(endpoints, 0, None), info, np.clip(dcls, 0, None).astype(np.float32),
+                           flux26=flux26, start_mask=p.start_mask, end_mask=p.end_mask)
+        if keep_fields:
+            from .fields import BundleFields
+
+            res.fields = BundleFields(chain, p, S_p, np.ascontiguousarray(beta[:, o0:o1]),
+                                      np.ascontiguousarray(launch[:, o0:o1]), a0)
         if on_result is not None:
             tw = time.perf_counter()
             on_result(res)
@@ -379,7 +599,7 @@ def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, ver
 
 def segment_bundles(chain, specs, launches, tol=1e-6, max_mem=8e9, max_iter=5000,
                     valid_classes=VALID_ENDS, on_result=None, on_trapped=None, verbose=False,
-                    clock=None):
+                    clock=None, keep_fields=False, accel=False, arc_length=False, zooms=None):
     """Segment bundles, sharing solves.  ``specs``: dicts with ``name`` and optional
     ``include`` (list of masks), ``exclude``, ``start``, ``end`` (boolean volumes on the chain
     grid).  Bundles are packed in order into groups whose columns fit in ``max_mem`` bytes;
@@ -388,7 +608,18 @@ def segment_bundles(chain, specs, launches, tol=1e-6, max_mem=8e9, max_iter=5000
     with the mass it could not finish per voxel (relative to the largest column's start).
     ``verbose``: timing inside the solves.  ``clock``: a Clock to add the time per stage to
     (default: a new one, reported at the end).
+    ``keep_fields``: also keep each bundle's solution columns (occupancy, completion and
+    launch mass per state) as ``result.fields`` (mpat.fields.BundleFields), for edge flux,
+    committors and conservation checks.  Three more float64 arrays of n_states x columns per
+    bundle; the plain chain only (not with spatial moments).
+    ``accel``: False (default), True / "mr" (Periodic Minimal Residual), or "aitken".
+    ``arc_length``: weight class visits by physical intra-voxel chord lengths (in mm if ``zooms``
+    is provided, else in voxels).
     Returns {name: BundleResult}."""
+    if keep_fields and chain.ncomp != 1:
+        raise ValueError("keep_fields needs the plain chain (ncomp == 1), not the moment chain")
+    if keep_fields:
+        max_mem = max_mem / 2    # the launch copy during the forward solve
     own = clock is None
     clock = clock or Clock()
     t_all = time.perf_counter()
@@ -408,13 +639,165 @@ def segment_bundles(chain, specs, launches, tol=1e-6, max_mem=8e9, max_iter=5000
                         p.name, p.C, cap)
         if group and used + p.C > cap:
             out.update(_solve_group(chain, group, launches, tol, max_iter, on_result, on_trapped,
-                                    verbose, clock))
+                                    verbose, clock, keep_fields, accel=accel, arc_length=arc_length,
+                                    zooms=zooms))
             group, used = [], 0
         group.append(p)
         used += p.C
     if group:
         out.update(_solve_group(chain, group, launches, tol, max_iter, on_result, on_trapped,
-                                verbose, clock))
+                                verbose, clock, keep_fields, accel=accel, arc_length=arc_length,
+                                zooms=zooms))
     if own:
         clock.report("bundle segmentation time", time.perf_counter() - t_all)
     return out
+
+
+def solve_bundle_cascade(chain, spec, launches, tol=1e-6, max_iter=5000, valid_classes=VALID_ENDS,
+                         accel=False):
+    """Non-negative Strong-Markov hitting cascade for a bundle with 1 include ROI (or 0 include
+    ROIs, delegated to segment_bundles).  Computes the exact bundle density, seed probabilities
+    and endpoints with zero signed inclusion-exclusion subtraction (every term >= 0)."""
+    inc_list = list(spec.get("include", ()))
+    if len(inc_list) == 0:
+        return segment_bundles(chain, [spec], launches, tol=tol, max_iter=max_iter,
+                               valid_classes=valid_classes, accel=accel)[spec["name"]]
+    if len(inc_list) > 1:
+        raise ValueError("solve_bundle_cascade currently supports 0 or 1 unordered include ROI")
+    t0 = time.time()
+    Ns, nb = chain.n_states, chain.nb
+    pad = np.zeros(chain.pshape, bool)
+
+    def padded(m):
+        p = pad.copy()
+        p[1:-1, 1:-1, 1:-1] = m
+        return p.ravel()
+
+    inc1 = padded(inc_list[0])
+    exc = padded(spec["exclude"]) if spec.get("exclude") is not None else pad.ravel()
+    st_vox = np.repeat(chain.t_lin, nb)
+    base_ok = ~exc[st_vox]
+    if getattr(chain, "kill", None) is not None:
+        base_ok &= ~chain.kill
+
+    in_I1 = base_ok & inc1[st_vox]
+    mask_0 = base_ok.astype(np.uint8)
+    mask_avoid1 = (base_ok & ~inc1[st_vox]).astype(np.uint8)
+
+    a_valid = np.isin(chain.a_class, np.asarray(valid_classes))
+    ends = [padded(spec[k])[chain.a_lin] if spec.get(k) is not None else None for k in ("start", "end")]
+    kinds, M_end, end_rule = _endpoint_kinds(a_valid, *ends)
+    nK = len(kinds)
+
+    absw_0 = np.stack([kinds[k] & ~exc[chain.a_lin] for k in range(nK)], 1).astype(np.float64)
+    absw_avoid1 = np.stack([kinds[k] & ~exc[chain.a_lin] & ~inc1[chain.a_lin] for k in range(nK)], 1).astype(np.float64)
+    absw_in1 = absw_0 - absw_avoid1
+
+    m_post = np.repeat(mask_0[:, None], nK, axis=1)
+    m_av1 = np.repeat(mask_avoid1[:, None], nK, axis=1)
+
+    r_post = chain.absorb_rhs(absw_0) * m_post
+    beta_post, info_b1 = solve_series(chain.mul_backward, r_post, m_post, tol, max_iter, "b_post", 1, accel=accel)
+
+    hit_on_roi = beta_post * in_I1[:, None]
+    q_into_roi = np.empty_like(beta_post)
+    chain.mul_backward(np.ascontiguousarray(hit_on_roi), q_into_roi)
+    r_into_roi = chain.absorb_rhs(absw_in1)
+    rhs_hit = (q_into_roi + r_into_roi) * m_av1
+    rhs_avoid = chain.absorb_rhs(absw_avoid1) * m_av1
+
+    rhs_both = np.concatenate([rhs_avoid, rhs_hit], axis=1)
+    m_both = np.concatenate([m_av1, m_av1], axis=1)
+    sol_both, info_b2 = solve_series(chain.mul_backward, rhs_both, m_both, tol, max_iter, "b_av_hit", 1, accel=accel)
+    beta_avoid = sol_both[:, :nK]
+    beta_hit = hit_on_roi + sol_both[:, nK:]
+
+    P = launches.pair_seed.size
+    H = launches.hseed.size
+    seed_in_exc = exc[launches.hseed]
+    seed_in_I1 = inc1[launches.hseed] & ~seed_in_exc
+    seed_outside = ~seed_in_exc & ~inc1[launches.hseed]
+
+    beta_all = np.ascontiguousarray(np.concatenate([beta_post, beta_avoid, beta_hit], axis=1))
+    absw_all = np.concatenate([absw_0, absw_avoid1, absw_in1], axis=1)
+    seed_ok_all = np.ones((H, 3 * nK))
+    vals_all = np.empty((H, 3 * nK))
+    K.half_values(launches.hseed, launches.lptr, launches.lkey, launches.lval,
+                  chain.label, chain.noff, chain.tindex, chain.aindex, nb,
+                  beta_all, absw_all, seed_ok_all, vals_all)
+    V_post = vals_all[:, :nK]
+    V_av = vals_all[:, nK:2 * nK]
+    V_ht = vals_all[:, 2 * nK:]
+
+    Vh_hit = np.where(seed_in_I1[:, None], V_post, np.where(seed_outside[:, None], V_ht, 0.0)).reshape(P, 2, nK)
+    Vh_av = np.where(seed_outside[:, None], V_av, 0.0).reshape(P, 2, nK)
+
+    pb = (
+        np.einsum("pk,kl,pl->p", Vh_hit[:, 0], M_end, Vh_hit[:, 1])
+        + np.einsum("pk,kl,pl->p", Vh_hit[:, 0], M_end, Vh_av[:, 1])
+        + np.einsum("pk,kl,pl->p", Vh_av[:, 0], M_end, Vh_hit[:, 1])
+    )
+    seed_prob = np.bincount(launches.pair_seed, weights=launches.pair_w * pb, minlength=len(launches.seeds))
+
+    V_part_any = Vh_hit[:, ::-1] + Vh_av[:, ::-1]
+    V_part_hit = Vh_hit[:, ::-1]
+    coef_must_hit = (np.einsum("phl,kl->phk", V_part_any, M_end) * launches.pair_w[:, None, None]).reshape(H, nK)
+    coef_may_avoid = (np.einsum("phl,kl->phk", V_part_hit, M_end) * launches.pair_w[:, None, None]).reshape(H, nK)
+
+    tab_exc = exc[:, None]
+    tab_av1 = (exc | inc1)[:, None]
+    xcol_0 = np.zeros(nK, np.int64)
+    pi_must_hit = np.zeros((Ns, nK))
+    pi_already_hit = np.zeros((Ns, nK))
+    pi_may_avoid = np.zeros((Ns, nK))
+    a0_must_in1 = np.zeros((chain.a_lin.size, nK))
+    a0_already = np.zeros((chain.a_lin.size, nK))
+    a0_avoid = np.zeros((chain.a_lin.size, nK))
+
+    K.scatter_init(launches.hseed, launches.lptr, launches.lkey, launches.lval,
+                   coef_must_hit * seed_outside[:, None], chain.label, chain.noff, chain.tindex, chain.aindex,
+                   nb, tab_exc, xcol_0, pi_must_hit, a0_must_in1)
+    K.scatter_init(launches.hseed, launches.lptr, launches.lkey, launches.lval,
+                   coef_must_hit * seed_in_I1[:, None], chain.label, chain.noff, chain.tindex, chain.aindex,
+                   nb, tab_exc, xcol_0, pi_already_hit, a0_already)
+    K.scatter_init(launches.hseed, launches.lptr, launches.lkey, launches.lval,
+                   coef_may_avoid * seed_outside[:, None], chain.label, chain.noff, chain.tindex, chain.aindex,
+                   nb, tab_av1, xcol_0, pi_may_avoid, a0_avoid)
+
+    pi_stage0 = np.concatenate([pi_must_hit * m_av1, pi_may_avoid * m_av1], axis=1)
+    S_stage0, info_f1 = solve_series(chain.mul_forward, pi_stage0, np.concatenate([m_av1, m_av1], axis=1),
+                                     tol, max_iter, "f_stage0", 1, accel=accel)
+    S_pre = S_stage0[:, :nK]
+    S_av = S_stage0[:, nK:]
+
+    q_from_pre = np.empty_like(S_pre)
+    chain.mul_forward(np.ascontiguousarray(S_pre), q_from_pre)
+    flux_I1 = (pi_must_hit + q_from_pre) * in_I1[:, None]
+
+    pi_stage1 = (pi_already_hit + flux_I1) * m_post
+    S_post, info_f2 = solve_series(chain.mul_forward, pi_stage1, m_post, tol, max_iter, "f_stage1", 1, accel=accel)
+
+    dcls = (S_pre * beta_hit + S_post * beta_post + S_av * beta_avoid).sum(1).reshape(chain.t_lin.size, nb)
+    ti = chain.tindex[launches.seed_lin]
+    pt = ti[launches.pair_seed]
+    on = pt >= 0
+    w0 = 0.5 * (launches.pair_w * pb)[on]
+    for k in (0, 1):
+        np.add.at(dcls, (pt[on], chain.geo.vbin[launches.pair_d[on, k]]), w0)
+    density = dcls.sum(1)
+    endpoints = (
+        ((a0_already + chain.absorbed_from(S_post)) * absw_0)
+        + ((a0_must_in1 + chain.absorbed_from(S_pre)) * absw_in1)
+        + ((a0_avoid + chain.absorbed_from(S_av)) * absw_avoid1)
+    ).sum(1)
+    info = dict(
+        n_seeds=int(len(launches.seeds)), n_streamlines=int(P),
+        expected_bundle_streamlines=float(seed_prob.sum()), endpoint_rule=end_rule,
+        endpoint_mass_check=float(endpoints.sum() / max(2 * seed_prob.sum(), 1e-300)),
+        n_columns=int(3 * nK), tolerance=tol, backward=info_b2, forward=info_f1,
+        negative_mass_before_clip=dict(density=float(-density[density < 0].sum()),
+                                       seed_prob=float(-seed_prob[seed_prob < 0].sum())),
+        seconds=round(time.time() - t0, 1),
+    )
+    return BundleResult(spec["name"], launches.seeds, seed_prob, density, endpoints, info, dcls.astype(np.float32))
+

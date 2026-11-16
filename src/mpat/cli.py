@@ -53,6 +53,10 @@ def main(argv=None):
                         "and a viewer page showing them, <stem>_desc-mpat_rois.html")
     p.add_argument("--viz-rois", action="store_true",
                    help="viewer pages also show each bundle's include (green) / exclude (red) ROIs")
+    p.add_argument("--flux", action="store_true", help="also write edge-flux maps per bundle (mpat.fields)")
+    p.add_argument("--fixels", action="store_true",
+                   help="also write an MRtrix fixel directory with each bundle's expected streamlines per fixel "
+                        "and its share of all traffic (mpat.fixels; one extra whole-brain solve)")
     p.add_argument("--afq-kwargs", default="{}",
                    help="extra ParticipantAFQ arguments: JSON, or a Python expression giving a dict, "
                         "with afd (AFQ.data.fetch), abd (AFQ.api.bundle_dict), mb (mpat.bundles) and the "
@@ -91,7 +95,7 @@ def main(argv=None):
         synthseg_thalamus=not a.mni_thalamus,
         max_length=a.max_length, viz_rois=a.viz_rois, no_midline=a.no_midline,
         midline_tol=a.midline_tol, out_dir=a.out_dir, verbose=a.verbose,
-        fornix=not a.no_fornix_exclude)
+        fornix=not a.no_fornix_exclude, flux=a.flux, fixels=a.fixels)
     if a.pyafq:   # pyAFQ's recognition: MPAT's rules removed, MPAT-only bundles (fornix) dropped
         from .bundles import pyafq_bd
 
@@ -114,18 +118,23 @@ def afq_kwargs(text):
     try:
         kwargs = json.loads(text)
     except json.JSONDecodeError:
-        import AFQ.api.bundle_dict as abd
-        import AFQ.data.fetch as afd
-        import AFQ.definitions.image as afm
-        import AFQ.definitions.mapping as amp
         import nibabel as nib
         import numpy as np
 
         import mpat.bundles as mb
 
-        scope = dict(afd=afd, abd=abd, mb=mb, np=np, nib=nib)
-        scope.update({k: getattr(afm, k) for k in afm.__all__})
-        scope.update({k: getattr(amp, k) for k in amp.__all__})
+        scope = dict(mb=mb, np=np, nib=nib)
+        try:
+            import AFQ.api.bundle_dict as abd
+            import AFQ.data.fetch as afd
+            import AFQ.definitions.image as afm
+            import AFQ.definitions.mapping as amp
+
+            scope.update(afd=afd, abd=abd)
+            scope.update({k: getattr(afm, k) for k in afm.__all__})
+            scope.update({k: getattr(amp, k) for k in amp.__all__})
+        except ImportError:
+            pass
         try:
             kwargs = eval(text, scope)  # noqa: S307 -- the user's own command line
         except Exception as err:
