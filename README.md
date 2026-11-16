@@ -1,8 +1,8 @@
 # MPAT: Markov probabilistic absorbing tractography
 
-[![docs](https://github.com/36000/MPAT/actions/workflows/docs.yml/badge.svg)](https://36000.github.io/MPAT/)
+[![docs](https://github.com/rokemlab/MPAT/actions/workflows/docs.yml/badge.svg)](https://rokemlab.github.io/MPAT/)
 
-**Documentation:** <https://36000.github.io/MPAT/>, including [how the method works](https://36000.github.io/MPAT/algorithm.html), with animations.
+**Documentation:** <https://rokemlab.github.io/MPAT/>, including [how the method works](https://rokemlab.github.io/MPAT/algorithm.html), with animations.
 
 MPAT computes white-matter bundles as exact expectations over infinitely many streamlines, with no sampling.
 
