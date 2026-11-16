@@ -3,15 +3,15 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mcat-tractography"
+name = "mpat-tractography"
 version = "0.1.0"
-description = "MCAT: Markov chain absorbing tractography"
+description = "MPAT: Markov probabilistic absorbing tractography"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "BSD-3-Clause" }
 dependencies = [
     "numpy>=1.26", "scipy>=1.11", "nibabel>=5", "numba>=0.59", "dipy>=1.9", "scikit-image",
-    "pyAFQ>=3.4",
+    "pyAFQ>=3.4", "trx-python",
     # MITTENS v2 is not on PyPI yet (it builds with a Rust toolchain via maturin)
     "mittens-dmri @ git+https://github.com/mattcieslak/MITTENS.git",
 ]
@@ -19,12 +19,17 @@ dependencies = [
 [project.optional-dependencies]
 viewer = ["ipyniivue>=2.4"]
 test = ["pytest>=8"]
+docs = [
+    "sphinx>=7.3", "myst-parser>=3", "pydata-sphinx-theme>=0.15", "sphinx-design",
+    "sphinx-copybutton", "sphinxcontrib-bibtex", "sphinxcontrib-programoutput",
+    "matplotlib>=3.8", "imageio-ffmpeg",
+]
 
 [project.scripts]
-mcat = "mcat.cli:main"
+mpat = "mpat.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-mcat = ["viewer.html"]
+mpat = ["viewer.html"]

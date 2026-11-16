@@ -1,6 +1,10 @@
-# MCAT: Markov chain absorbing tractography
+# MPAT: Markov probabilistic absorbing tractography
 
-MCAT computes white-matter bundles as exact expectations over infinitely many streamlines, with no sampling.
+[![docs](https://github.com/36000/MPAT/actions/workflows/docs.yml/badge.svg)](https://36000.github.io/MPAT/)
+
+**Documentation:** <https://36000.github.io/MPAT/>, including [how the method works](https://36000.github.io/MPAT/algorithm.html), with animations.
+
+MPAT computes white-matter bundles as exact expectations over infinitely many streamlines, with no sampling.
 
 - **The chain.** Probabilistic tracking is treated as an absorbing Markov chain on (white-matter voxel, direction) states. The transitions are the analytic hop geometry of [MITTENS](https://github.com/mattcieslak/MITTENS), with the walker's incoming direction remembered between voxels.
 - **Bundle selection.** Include, exclude and endpoint ROIs are applied with forward and backward passes over that chain. This is transition path theory's reactive density, with inclusion–exclusion for the include ROIs.
@@ -8,31 +12,31 @@ MCAT computes white-matter bundles as exact expectations over infinitely many st
 
 ```python
 from AFQ.api.participant import ParticipantAFQ      # or GroupAFQ: every participant in turn
-import mcat
+import mpat
 
 afq = ParticipantAFQ(dwi, bval, bvec, t1, output_dir)
-mcat.run(afq, n_proc=8, max_mem="16GB")              # -> <output_dir>/mcat/
-mcat.view(f"{output_dir}/mcat", t1=t1_masked, bundles=["LeftArcuate", "LeftCorticospinal"], glyphs=True)
+mpat.run(afq, n_proc=8, max_mem="16GB")              # -> <output_dir>/mpat/
+mpat.view(f"{output_dir}/mpat", t1=t1_masked, bundles=["LeftArcuate", "LeftCorticospinal"], glyphs=True)
 ```
 
-The command line runs pyAFQ and MCAT on one participant:
+The command line runs pyAFQ and MPAT on one participant:
 
 ```bash
-mcat sub-01_dwi.nii.gz sub-01_dwi.bval sub-01_dwi.bvec sub-01_T1w.nii.gz out/ --n-proc 8 --max-mem 16GB
+mpat sub-01_dwi.nii.gz sub-01_dwi.bval sub-01_dwi.bvec sub-01_T1w.nii.gz out/ --n-proc 8 --max-mem 16GB
 ```
 
 ## Install
 
 ```bash
 pip install maturin                                   # MITTENS v2 builds with Rust (https://rustup.rs)
-pip install "mcat-tractography[viewer] @ git+<this repository>"
+pip install "mpat-tractography[viewer] @ git+<this repository>"
 ```
 
 MITTENS v2 (`mittens-dmri`) is not on PyPI yet, so pip builds it from GitHub with your Rust toolchain.
 
 ## Options
 
-| `mcat.run(...)` | CLI | default | |
+| `mpat.run(...)` | CLI | default | |
 |---|---|---|---|
 | `n_proc` | `--n-proc` | required | threads |
 | `max_mem` | `--max-mem` | required | memory budget. Bundles are packed into groups that share every pass over the transition matrix; the budget sets how many fit. |
@@ -40,27 +44,27 @@ MITTENS v2 (`mittens-dmri`) is not on PyPI yet, so pip builds it from GitHub wit
 | `tol` | `--tol` | 1e-10 | remaining walker mass at which the solves stop |
 | `angle` | `--angle` | 35 | maximum turn per one-voxel hop (degrees). |
 | `double_odf` | `--single-odf` | doubleODF | `--single-odf` gives first-order hops (see [MITTENS](https://github.com/mattcieslak/MITTENS))|
-| `flux` | `--flux` | off | also write each bundle's edge flux and through-flux maps ([docs/fields.md](docs/fields.md)); not with moments |
-| `fixels` | `--fixels` | off | also write an MRtrix fixel directory: each bundle's expected streamlines through every fixel of the fODF, and its share of all traffic ([docs/fields.md](docs/fields.md) section 9); one extra whole-brain solve |
+| `flux` | `--flux` | off | also write each bundle's edge flux and through-flux maps (`docs/fields.md`); not with moments |
+| `fixels` | `--fixels` | off | also write an MRtrix fixel directory: each bundle's expected streamlines through every fixel of the fODF, and its share of all traffic (`docs/fields.md` section 9); one extra whole-brain solve |
 | `bundles` | `--bundles` | all in pyAFQ's bundle dictionary | pyAFQ names, e.g. "Left Arcuate"; output files drop the spaces (`bundle-LeftArcuate`) |
 | `viz` | `--no-viz` | on | the collage and viewer pages below |
 
 Any pyAFQ setting goes on the `ParticipantAFQ`; with the CLI, pass it as `--afq-kwargs`. That covers the fODF model (`tracking_params={"odf_model": ...}`), the PVE, custom bundle dictionaries including subject-space ROIs, and `segmentation_params={"dist_to_atlas": ...}`. `--afq-kwargs` takes JSON, or a Python expression that gives a dict, for settings that are Python objects. The expression sees `afd` (`AFQ.data.fetch`), `abd` (`AFQ.api.bundle_dict`), the `AFQ.definitions` image and mapping classes, `np` and `nib`. For example, an infant run:
 
 ```bash
-mcat dwi.nii.gz dwi.bval dwi.bvec T2w.nii.gz out/ --n-proc 12 --max-mem 16GB \
+mpat dwi.nii.gz dwi.bval dwi.bvec T2w.nii.gz out/ --n-proc 12 --max-mem 16GB \
     --afq-kwargs 'dict(reg_template_spec=afd.read_pediatric_templates()["UNCNeo-withCerebellum-for-babyAFQ"],
                        bundle_info=abd.baby_bd(), pve="babyseg", brain_mask_definition=BabyBrainMask())'
 ```
 
 **Solves that crawl** switch to a Krylov solver automatically, with no setting. A normal bundle loses about 10% of its walker mass per step, so 1e-10 takes 300–500 steps and Krylov never triggers. When nearly everything is walkable (ie, all-WM), walkers circle for thousands of steps. Once power iteration would need 500 or more further steps, or stalls, the rest of the series is solved with BiCGSTAB.
 
-## Outputs (`<output_dir>/mcat/`, or `mcat-moments/`)
+## Outputs (`<output_dir>/mpat/`, or `mpat-moments/`)
 
 | file | |
 |---|---|
 | `<sub>_bundle-<Name>_desc-density_map.nii.gz` | expected steps of bundle streamlines in each voxel, summed over all seeds |
-| `..._desc-afd_map.nii.gz` | analytical SIFT2 density: the bundle's share of each fixel's Apparent Fibre Density (AFD, in steradians), summed over the voxel's fixels (`mcat.quantify`) |
+| `..._desc-afd_map.nii.gz` | analytical SIFT2 density: the bundle's share of each fixel's Apparent Fibre Density (AFD, in steradians), summed over the voxel's fixels (`mpat.quantify`) |
 | `..._desc-tdimm_map.nii.gz` | chord-weighted track-density image (expected physical streamline length in mm traversed per voxel) |
 | `..._desc-qharmonic_map.nii.gz` | Laplace–Beltrami harmonic committor coordinate $q \in [0, 1]$ from start ($0$) to end ($1$) on the bundle's reactive flux graph |
 | `..._desc-coherence_map.nii.gz` | directional coherence $\in [0, 1]$ of the bundle's 26-neighbour reactive edge flux in each voxel |
@@ -69,17 +73,17 @@ mcat dwi.nii.gz dwi.bval dwi.bvec T2w.nii.gz out/ --n-proc 12 --max-mem 16GB \
 | `..._desc-visitodf_dwimap.nii.gz` | visitation ODF: the directions the bundle's streamlines travel in each voxel, as SH in the fODF's basis (DIPY descoteaux07, lmax 8), in expected visits per steradian; it integrates to the density. Written where the density is at least 1e-3 of its peak |
 | `..._desc-seedprob_probmap.nii.gz` | probability that the streamline seeded in each interface voxel belongs to the bundle |
 | `..._desc-start_mask`, `_desc-end_mask` | the endpoint ROIs used (pyAFQ's `dist_to_atlas` applied) |
-| `..._desc-core_path.tsv`, `_desc-core.tck` | the bundle's core: the cross-section ridge path, 100 nodes |
+| `..._desc-core_path.tsv`, `_desc-core.trx` | the bundle's core: the cross-section ridge path, 100 nodes |
 | `..._desc-throughflux_map.nii.gz`, `_desc-edgeflux_map.nii.gz` | with `flux`: expected bundle-streamline steps leaving each voxel, and the same per neighbour (26 volumes) |
-| `<sub>_desc-mcat_fixels/` | with `fixels`: MRtrix fixel directory (`index`, `directions`, `<bundle>_streamlines`, `all_streamlines`, `<bundle>_share`, `<bundle>_share_of_bundles`) |
+| `<sub>_desc-mpat_fixels/` | with `fixels`: MRtrix fixel directory (`index`, `directions`, `<bundle>_streamlines`, `all_streamlines`, `<bundle>_share`, `<bundle>_share_of_bundles`) |
 | `..._desc-summary.json` | settings, solve diagnostics, mass check, and per-bundle quantifications |
-| `<sub>_desc-mcat_table.tsv` | per bundle: expected streamlines, mean length (mm), AFD tract volume ($\text{mm}^3$), AFD cross-sectional area ($\text{mm}^2$), median cut-flux, columns, steps, Krylov products, time |
-| `<sub>_desc-mcat_dseg.nii.gz` | the tissue labels used: 1 WM, 2 GM, 3 CSF, 4 brain edge |
-| `<sub>_desc-mcat_collage.png` | every bundle's density as sagittal, coronal and axial maximum-intensity projections, log scale (`viz`) |
-| `<sub>_desc-mcat_view.html` | viewer page with every bundle: densities and cores (`viz`) |
+| `<sub>_desc-mpat_table.tsv` | per bundle: expected streamlines, mean length (mm), AFD tract volume ($\text{mm}^3$), AFD cross-sectional area ($\text{mm}^2$), median cut-flux, columns, steps, Krylov products, time |
+| `<sub>_desc-mpat_dseg.nii.gz` | the tissue labels used: 1 WM, 2 GM, 3 CSF, 4 brain edge |
+| `<sub>_desc-mpat_collage.png` | every bundle's density as sagittal, coronal and axial maximum-intensity projections, log scale (`viz`) |
+| `<sub>_desc-mpat_view.html` | viewer page with every bundle: densities and cores (`viz`) |
 | `..._bundle-<Name>_desc-view.html` | viewer page for one bundle, with its visitation-ODF glyphs and the fODF (`viz`) |
 
-`mcat.view` returns an [ipyniivue](https://github.com/niivue/ipyniivue) widget. It shows the three slices and a 3-D render as an equal 2 × 2 grid, each bundle's density on a log scale from 1e-3 of its peak, and its core as a tube. Every volume is cropped to the head and the bundles, so the views fill their space, and nothing is transparent: the density is opaque over the background, and the 3-D view shows each bundle as an opaque surface (`isosurface`, on by default) inside a lit head cut open towards the camera. Double-click a view to enlarge it to the whole widget, and double-click again for all four (on the web page, Esc works too).
+`mpat.view` returns an [ipyniivue](https://github.com/niivue/ipyniivue) widget. It shows the three slices and a 3-D render as an equal 2 × 2 grid, each bundle's density on a log scale from 1e-3 of its peak, and its core as a tube. Every volume is cropped to the head and the bundles, so the views fill their space, and nothing is transparent: the density is opaque over the background, and the 3-D view shows each bundle as an opaque surface (`isosurface`, on by default) inside a lit head cut open towards the camera. Double-click a view to enlarge it to the whole widget, and double-click again for all four (on the web page, Esc works too).
 
 With `glyphs=True` (or a list of bundle names) it also draws the visitation ODFs as glyphs, like fODF glyphs. Where the fODF has a crossing, the glyph shows only the lobe the bundle uses. Glyphs follow the slices: every voxel at or above `glyph_floor` (1e-2 of the peak) gets one, drawn on the three slices through the crosshair, and redrawn as you click or scroll. The slices start at the core's midpoint. Options:
 
@@ -88,7 +92,7 @@ With `glyphs=True` (or a list of bundle names) it also draws the visitation ODFs
 - `glyph_norm=False` sizes glyphs by visits instead of normalising each one.
 - `glyph_color` is `"direction"` or `"bundle"`.
 
-`mcat.viewer.save_html("bundles.html", folder, glyphs=True, ...)` writes the same scene as a standalone web page to open in any browser or share. It has controls for the layout, each bundle's density, core and glyphs, the opacities, and whether scrolling moves slices or zooms. Two log-scale sliders set the faintest density shown (down to 1e-6 of each bundle's peak) and the faintest voxel that gets a glyph (down to 1e-3). A checkbox (on by default) draws each bundle as an opaque surface at the density slider's level, redrawn as the slider moves; the notebook widget draws it at `floor`. The data are embedded and the page meshes the glyphs itself. NiiVue loads from a CDN; pass `niivue_js=` a local `niivue.umd.js` (npm `@niivue/niivue`, `dist/`) to embed it and work offline.
+`mpat.viewer.save_html("bundles.html", folder, glyphs=True, ...)` writes the same scene as a standalone web page to open in any browser or share. It has controls for the layout, each bundle's density, core and glyphs, the opacities, and whether scrolling moves slices or zooms. Two log-scale sliders set the faintest density shown (down to 1e-6 of each bundle's peak) and the faintest voxel that gets a glyph (down to 1e-3). A checkbox (on by default) draws each bundle as an opaque surface at the density slider's level, redrawn as the slider moves; the notebook widget draws it at `floor`. The data are embedded and the page meshes the glyphs itself. NiiVue loads from a CDN; pass `niivue_js=` a local `niivue.umd.js` (npm `@niivue/niivue`, `dist/`) to embed it and work offline.
 
 ## Method
 
@@ -96,7 +100,7 @@ With `glyphs=True` (or a list of bundle names) it also draws the visitation ODFs
 - **Geometry (MITTENS v2).**
   - A hop is one voxel long (of the smallest voxel side) and turns less than `angle`.
   - MITTENS enumerates every hop sequence inside a voxel, with the exact volume of start points, on DSI Studio's 642-direction sphere. Anisotropic voxels are exact.
-  - MCAT adds each path's last direction class (the walker's memory), its box of start points (for moments), and a preorder prefix tree (`geometry._build_prefix_tree`) that skips zero-fODF subtrees in $O(1)$ time during matrix assembly.
+  - MPAT adds each path's last direction class (the walker's memory), its box of start points (for moments), and a preorder prefix tree (`geometry._build_prefix_tree`) that skips zero-fODF subtrees in $O(1)$ time during matrix assembly.
 - **Transitions.**
   - A state is (voxel, one of 26 direction classes). Its transitions are sums over MITTENS paths of the fODF's turning probabilities times the doubleODF look-ahead, conditioned on the incoming direction.
   - Each transition is stored as a 1-byte slot into its class's template of (neighbour, class) pairs, plus a float64 weight. One copy serves forward (scatter) and backward (gather) steps.
@@ -105,21 +109,21 @@ With `glyphs=True` (or a list of bundle names) it also draws the visitation ODFs
   - One forward solve from every seed's launch, weighted by its partner half's completion, gives the occupancy. Occupancy × completion is the bundle density.
 - **Spatial moments.** States also carry their mean sub-voxel position, with a linear (Prather) closure that is exact per MITTENS path (`ChainConfig(moments=True)`, with optional slope-limited `"positivity"` or $3 \times 3$ `"transverse"` closures). Without them, every voxel restarts its paths from a uniform position, which makes bundles several times too wide.
 - **Visitation ODFs.** The bundle density is kept per direction class (state), then spread over the sphere within each class as the chain itself assumes (q ∝ X·Y, the fODF times its cone sum). It is symmetrised and fitted with SH.
-- **Fixels.** The walkers' headings are known per voxel, so a bundle's density splits exactly among the fODF's lobes: `mcat.fixels` segments the fixels in parallel L1-cache Numba and pre-aggregates class-to-fixel weights (`_w_fix`), giving each bundle's expected streamlines through every fixel in ~40 ms (`mcat.DirectedFixelChain` also builds a chain directly on the segmented lobes). See [docs/fields.md](docs/fields.md) section 9.
-- **Bundle fields.** The occupancy and completion solutions behind the maps can be kept (`segment_bundles(keep_fields=True)`, `mcat.fields`): they give the bundle's edge flux (expected streamline steps along every transition, conserved, counting the streamlines across any cut), committors (where the walks through a voxel end) and an exact endpoint filter. [docs/fields.md](docs/fields.md) explains them and reports a test-retest evaluation.
+- **Fixels.** The walkers' headings are known per voxel, so a bundle's density splits exactly among the fODF's lobes: `mpat.fixels` segments the fixels in parallel L1-cache Numba and pre-aggregates class-to-fixel weights (`_w_fix`), giving each bundle's expected streamlines through every fixel in ~40 ms (`mpat.DirectedFixelChain` also builds a chain directly on the segmented lobes). See `docs/fields.md` section 9.
+- **Bundle fields.** The occupancy and completion solutions behind the maps can be kept (`segment_bundles(keep_fields=True)`, `mpat.fields`): they give the bundle's edge flux (expected streamline steps along every transition, conserved, counting the streamlines across any cut), committors (where the walks through a voxel end) and an exact endpoint filter. `docs/fields.md` explains them and reports a test-retest evaluation.
 
 ## Extensions: doing streamline-era analyses without streamlines
 
-Dropping individual streamlines does not mean losing quantitative tractometry, SIFT/SIFT2 filtering, or structural connectomes. Because the chain's transition-path fields give the exact directional density, 26-neighbour reactive edge flux, and fixel traffic at every white-matter voxel, standard streamline-era analyses have closed-form Markov counterparts ([docs/fields.md](docs/fields.md) section 10; full benchmarks and visual atlases in [docs/benchmarks/exploration_results.md](docs/benchmarks/exploration_results.md)):
+Dropping individual streamlines does not mean losing quantitative tractometry, SIFT/SIFT2 filtering, or structural connectomes. Because the chain's transition-path fields give the exact directional density, 26-neighbour reactive edge flux, and fixel traffic at every white-matter voxel, standard streamline-era analyses have closed-form Markov counterparts (`docs/fields.md` section 10; full benchmarks and visual atlases in `docs/benchmarks/exploration_results.md`):
 
-- **Cores and harmonic along-tract coordinates (`mcat.core`, `mcat.quantify`).**
-  - *1-D cross-section ridge core (`bundle_core`):* A first Dijkstra shortest path (`cost = -log(density / peak)`) finds the bundle corridor between the endpoint anchors (`split_ends`). Multi-source Dijkstra from that path partitions the bundle into orthogonal cross-sections, and a second Dijkstra pass with cost $-\log(\text{density} / \max_{\text{cs}} \text{density})$ follows the cross-sectional peak with **zero length penalty**, so the core never cuts corners around bends (`_desc-core.tck`, `_desc-core_path.tsv`).
+- **Cores and harmonic along-tract coordinates (`mpat.core`, `mpat.quantify`).**
+  - *1-D cross-section ridge core (`bundle_core`):* A first Dijkstra shortest path (`cost = -log(density / peak)`) finds the bundle corridor between the endpoint anchors (`split_ends`). Multi-source Dijkstra from that path partitions the bundle into orthogonal cross-sections, and a second Dijkstra pass with cost $-\log(\text{density} / \max_{\text{cs}} \text{density})$ follows the cross-sectional peak with **zero length penalty**, so the core never cuts corners around bends (`_desc-core.trx`, `_desc-core_path.tsv`).
   - *3-D harmonic committor field (`harmonic_tractometry`):* Solving the Laplace–Beltrami Dirichlet equation $(L_W + \operatorname{diag}(g_S + g_E))\,q = g_E$ on the bundle's symmetrized reactive flux graph gives an intrinsic coordinate $q_{\text{harmonic}} \in [0, 1]$ (`_desc-qharmonic_map.nii.gz`) whose level sets are everywhere orthogonal to the flow and carry a conserved net reactive current $\mathcal{I}_{\text{cut}}(q)$ equal to the bundle's expected streamline count.
-- **Branching, fanning, and fiber coherence (`mcat.quantify.routing_entropy_and_coherence`).**
+- **Branching, fanning, and fiber coherence (`mpat.quantify.routing_entropy_and_coherence`).**
   - The bundle's 26-neighbour outgoing reactive flux $F_b(v, n)$ isolates *this* bundle's transitions even inside crossing-fiber voxels. Its normalized routing distribution $p_b(n \mid v)$ yields the **effective branching number** $K_{\text{eff}}(v) = \exp(H_b(v)) \in [1, 26]$ (`_desc-keff_map.nii.gz`) and **directional flux coherence** $\text{coh}_b(v) \in [0, 1]$ (`_desc-coherence_map.nii.gz`), separating tight deep-white-matter trunks ($K_{\text{eff}} \approx 5\text{–}7$, $\text{coh} \approx 0.7\text{–}0.8$) from cortical fans ($K_{\text{eff}} \approx 8.5\text{–}10$, $\text{coh} \approx 0.5$).
-- **Analytical SIFT and SIFT2 on bundles (`mcat.quantify.afd_tract_metrics`).**
+- **Analytical SIFT and SIFT2 on bundles (`mpat.quantify.afd_tract_metrics`).**
   - Raw visitation density (`density_t`) scales with seed count and is inflated by path length $L$. Dividing a bundle's fixel traffic $n_b(f)$ by the unconditioned whole-brain fixel traffic $n_{\text{all}}(f)$ and multiplying by the lobe's Apparent Fibre Density $\text{AFD}(f)$ gives the bundle's seed-invariant intra-axonal density (`_desc-afd_map.nii.gz`) and **AFD-calibrated tract volume** $\mathcal{V}_{\text{AFD}}$ ($\text{mm}^3$) without iterative SIFT optimization. Dividing $\mathcal{V}_{\text{AFD}}$ by the exact Markov mean streamline length $\bar{L}_b$ (from the chord-weighted TDI map `_desc-tdimm_map.nii.gz`) removes length bias to give the **effective axonal cross-sectional area** $\mathcal{A}_{\text{AFD}} = \mathcal{V}_{\text{AFD}} / \bar{L}_b$ ($\text{mm}^2$).
-- **Whole-brain SIFT2 structural connectivity matrices (`mcat.connectome.build_connectome`).**
+- **Whole-brain SIFT2 structural connectivity matrices (`mpat.connectome.build_connectome`).**
   - Given any cortical/subcortical parcellation with $R$ parcels in dMRI space, `build_connectome` solves two batched $R$-column backward systems — hitting probabilities $(I - Q) B = R_{\text{abs}} E_{\text{GM}}$ and expected path lengths $(I - Q) M_{\text{len}} = d_{\text{chord}} \odot B$ — and projects them onto the forward and antipodal backward weights of every white-matter fixel. That partitions the brain's total intra-axonal AFD volume across all $\binom{R}{2}$ parcel pairs in closed form (`~135 s` for 100 Schaefer parcels), yielding seed-free $R \times R$ matrices of SIFT2 volume $V_{\text{AFD}}(i, j)$ ($\text{mm}^3$), mean streamline length $\bar{L}_{ij}$ ($\text{mm}$), and length-debiased cross-sectional area $\mathcal{A}_{\text{AFD}}(i, j) = V_{\text{AFD}}(i, j) / \bar{L}_{ij}$ ($\text{mm}^2$).
 
 

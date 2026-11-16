@@ -3,14 +3,14 @@ partitioned among them, and the fixel directory written and read back."""
 import numpy as np
 import pytest
 
-from mcat.fixels import (
+from mpat.fixels import (
     fixel_streamlines,
     read_mif,
     segment_lobes,
     write_fixel_directory,
     write_mif,
 )
-from mcat.geometry import OFFSETS, build_geometry
+from mpat.geometry import OFFSETS, build_geometry
 
 
 def _sh(directions, kappa=20.0):

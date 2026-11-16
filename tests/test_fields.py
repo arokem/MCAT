@@ -4,14 +4,14 @@ visits, and endpoint restriction is exact."""
 import numpy as np
 import pytest
 
-from mcat import (
+from mpat import (
     Chain,
     ChainConfig,
     prepare_launches,
     restrict_endpoints,
     segment_bundles,
 )
-from mcat.geometry import OFFSETS
+from mpat.geometry import OFFSETS
 
 NX, NY, NZ = 14, 7, 7
 WM = (slice(2, 12), slice(2, 5), slice(2, 5))   # white matter along x, 3 x 3 cross-section
@@ -32,7 +32,7 @@ def _sh_rows():
 
 def _build(kill_x=None):
     """The phantom chain, its launches and bundle specs.  ``kill_x``: voxel planes whose
-    oblique direction states are past the soft maximum length (chain.kill, as mcat.afq sets it)."""
+    oblique direction states are past the soft maximum length (chain.kill, as mpat.afq sets it)."""
     fiber, iso = _sh_rows()
     sh = np.zeros((NX, NY, NZ, fiber.size), np.float32)
     transient = np.zeros((NX, NY, NZ), bool)

@@ -10,7 +10,7 @@
 import numpy as np
 import pytest
 
-from mcat import (
+from mpat import (
     BundleQuantification,
     Chain,
     ChainConfig,
@@ -25,10 +25,10 @@ from mcat import (
     segment_lobes,
     solve_bundle_cascade,
 )
-from mcat.geometry import build_geometry
-import mcat.kernel as K
-from mcat.moments import MomentChain, _prep_m, _prep_m_tree
-from mcat.solve import solve_series
+from mpat.geometry import build_geometry
+import mpat.kernel as K
+from mpat.moments import MomentChain, _prep_m, _prep_m_tree
+from mpat.solve import solve_series
 
 
 def _sh(directions, kappa=20.0):
@@ -289,7 +289,7 @@ def test_ptt_chain_config(crossing_phantom):
 
 
 def test_sift2_optimize_launches_and_exact_tdi(crossing_phantom):
-    from mcat import sift2_optimize_launches
+    from mpat import sift2_optimize_launches
 
     sh, zooms, transient, absorb, seeds = crossing_phantom
     chain = Chain.build(sh, zooms, transient, absorb, ChainConfig())
