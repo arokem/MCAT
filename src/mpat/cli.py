@@ -64,6 +64,23 @@ def main(argv=None):
     p.add_argument("--fixels", action="store_true",
                    help="also write an MRtrix fixel directory with each bundle's expected streamlines per fixel "
                         "and its share of all traffic (mpat.fixels; one extra whole-brain solve)")
+    p.add_argument("--ptt", action="store_true",
+                   help="use Parallel Transport Tractography (PTT) defaults (fod_thresh=0.08, fod_power=1.5, "
+                        "curv_sigma=18.0, probe_radius=0.5, stop_mass=1e-4)")
+    p.add_argument("--step", type=float, default=1.0, help="hop length in voxels (default 1.0)")
+    p.add_argument("--stop-mass", type=float, default=None, help="MITTENS stopping regularizer tau")
+    p.add_argument("--fod-thresh", type=float, default=None, help="relative fODF floor")
+    p.add_argument("--fod-power", type=float, default=None, help="fODF sharpening exponent p")
+    p.add_argument("--curv-sigma", type=float, default=None, help="PTT curvature & co-circularity sigma (deg)")
+    p.add_argument("--probe-radius", type=float, default=None, help="PTT cylindrical probe radius (voxels)")
+    p.add_argument("--sift2", action="store_true",
+                   help="calibrate seed launch weights globally with path-consistent SIFT2 before segmentation")
+    p.add_argument("--arbor", action="store_true",
+                   help="also extract and write 3-D multi-branch cross-section ridge arbors (.trx, .json, .tsv)")
+    p.add_argument("--arbor-branches", type=int, default=5,
+                   help="maximum cortical endpoint branches per side for arbor extraction (default 5)")
+    p.add_argument("--save-transitions", choices=("odx", "nifti", "both"), default=None,
+                   help="persist transition probabilities as ODX (.odx), 4-D NIfTI (.nii.gz + codi/coasy), or both")
     p.add_argument("--afq-kwargs", default="{}",
                    help="extra ParticipantAFQ arguments: JSON, or a Python expression giving a dict, "
                         "with afd (AFQ.data.fetch), abd (AFQ.api.bundle_dict), mb (mpat.bundles) and the "
@@ -106,7 +123,11 @@ def main(argv=None):
         synthseg_thalamus=not a.mni_thalamus,
         max_length=a.max_length, viz_rois=a.viz_rois, no_midline=a.no_midline,
         midline_tol=a.midline_tol, out_dir=a.out_dir, verbose=a.verbose,
-        fornix=not a.no_fornix_exclude, flux=a.flux, fixels=a.fixels, viz_colormap=a.colormap)
+        fornix=not a.no_fornix_exclude, flux=a.flux, fixels=a.fixels, viz_colormap=a.colormap,
+        ptt=a.ptt, step=a.step, stop_mass=a.stop_mass, fod_thresh=a.fod_thresh,
+        fod_power=a.fod_power, curv_sigma=a.curv_sigma, probe_radius=a.probe_radius,
+        sift2=a.sift2, arbor=a.arbor, arbor_branches=a.arbor_branches,
+        save_transitions=a.save_transitions or False)
     if a.pyafq:   # pyAFQ's recognition: MPAT's rules removed, MPAT-only bundles (fornix) dropped
         from .bundles import pyafq_bd
 

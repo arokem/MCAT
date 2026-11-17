@@ -12,7 +12,25 @@ pyAFQ provides the fODF, tissue, seeds, bundle definitions and warped ROIs.
     mpat.run(afq, n_proc=8, max_mem="16GB")            # -> <output_dir>/mpat/
     mpat.view(f"{output_dir}/mpat", bundles=["LeftArcuate"])   # in a notebook
 """
+import os
+
+os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from .afq import run
+from .branches import (
+    BranchArbor,
+    BranchCurve,
+    FluxTractogram,
+    extract_branch_arbor,
+    extract_flux_streamlines,
+    render_trxviz,
+    write_arbor,
+    write_arbors,
+    write_isosurface_gifti,
+    write_trx,
+    write_trxviz_project,
+)
 from .chain import Chain, ChainConfig
 from .connectome import ConnectomeResult, build_connectome
 from .core import bundle_core
@@ -21,6 +39,13 @@ from .fixels import DirectedFixelChain, fixel_streamlines, segment_lobes, write_
 from .geometry import class_chord_lengths
 from .quantify import BundleQuantification, afd_tract_metrics, quantify_bundle, sift2_optimize_launches
 from .solve import prepare_launches, segment_bundles, solve_bundle_cascade
+from .transitions import (
+    load_transitions_nifti,
+    load_transitions_odx,
+    marginal_transition_metrics,
+    save_transitions_nifti,
+    save_transitions_odx,
+)
 from .viewer import save_html
 
 
@@ -31,9 +56,45 @@ def view(*args, **kwargs):
     return _view(*args, **kwargs)
 
 
-__all__ = ["BundleFields", "BundleQuantification", "Chain", "ChainConfig", "ConnectomeResult",
-           "DirectedFixelChain", "afd_tract_metrics", "build_connectome", "bundle_core",
-           "class_chord_lengths", "endpoint_patches", "fixel_streamlines", "flux_orientation",
-           "prepare_launches", "quantify_bundle", "restrict_endpoints", "run", "save_html",
-           "segment_bundles", "segment_lobes", "sift2_optimize_launches", "solve_bundle_cascade",
-           "view", "write_fixel_directory"]
+__all__ = [
+    "BranchArbor",
+    "BranchCurve",
+    "BundleFields",
+    "BundleQuantification",
+    "Chain",
+    "ChainConfig",
+    "ConnectomeResult",
+    "DirectedFixelChain",
+    "FluxTractogram",
+    "afd_tract_metrics",
+    "build_connectome",
+    "bundle_core",
+    "class_chord_lengths",
+    "endpoint_patches",
+    "extract_branch_arbor",
+    "extract_flux_streamlines",
+    "fixel_streamlines",
+    "flux_orientation",
+    "load_transitions_nifti",
+    "load_transitions_odx",
+    "marginal_transition_metrics",
+    "prepare_launches",
+    "quantify_bundle",
+    "render_trxviz",
+    "restrict_endpoints",
+    "run",
+    "save_html",
+    "save_transitions_nifti",
+    "save_transitions_odx",
+    "segment_bundles",
+    "segment_lobes",
+    "sift2_optimize_launches",
+    "solve_bundle_cascade",
+    "view",
+    "write_arbor",
+    "write_arbors",
+    "write_fixel_directory",
+    "write_isosurface_gifti",
+    "write_trx",
+    "write_trxviz_project",
+]

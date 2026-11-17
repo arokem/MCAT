@@ -18,6 +18,10 @@ hops through the normaliser Z_v.
 """
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
+
 import numpy as np
 from numba import njit, prange
 

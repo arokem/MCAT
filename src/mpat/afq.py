@@ -58,7 +58,7 @@ def tissue_labels(sh_img, pve_img, brain_mask_img=None):
     (treated as CSF, never entered), labelled 5 in dseg, and logged.
     Returns transient, absorbing class (0 outside, 1 GM, 2 CSF, 3 edge), dseg (1 WM, 2 GM,
     3 CSF, 4 edge, 5 isolated WM)."""
-    from skimage.segmentation import find_boundaries
+    from scipy import ndimage as ndi
 
     mask = np.any(np.asarray(sh_img.dataobj) != 0, axis=-1)
     if brain_mask_img is not None:
@@ -66,8 +66,6 @@ def tissue_labels(sh_img, pve_img, brain_mask_img=None):
     csf, gm, wm = np.moveaxis(_on_grid(pve_img, sh_img), -1, 0)
     # holes inside the fODF region (voxels whose fit is all zero) each get a rim of "edge",
     # where walkers end validly: a few are harmless, many cut every bundle short
-    from scipy import ndimage as ndi
-
     holes = int((ndi.binary_fill_holes(mask) & ~mask).sum())
     if holes > HOLE_WARN * mask.sum():
         log.warning("%d voxels (%.1f%% of the fODF region) inside it have an all-zero fODF; each hole is "
@@ -76,7 +74,12 @@ def tissue_labels(sh_img, pve_img, brain_mask_img=None):
                     holes, 100 * holes / mask.sum())
     elif holes:
         log.info("%d voxels inside the fODF region have an all-zero fODF", holes)
-    edge = find_boundaries(mask, mode="inner") & mask
+    try:
+        from skimage.segmentation import find_boundaries
+
+        edge = find_boundaries(mask, mode="inner") & mask
+    except ImportError:
+        edge = mask & ~ndi.binary_erosion(mask, border_value=1)
     transient = mask & ~edge & (wm > WM_THRESHOLD)
     absorb = np.zeros(mask.shape, np.int8)
     absorb[mask & ~transient & (gm >= csf)] = 1
@@ -643,7 +646,9 @@ def _bytes(x):
 def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angle=35.0, double_odf=True,
         cores=True, viz=True, synthseg_thalamus=True, max_length=250.0, viz_rois=False,
         no_midline=(), midline_tol=None, out_dir=None, verbose=False, fornix=True, flux=False,
-        fixels=False, viz_colormap=None):
+        fixels=False, viz_colormap=None, ptt=False, step=1.0, stop_mass=None, fod_thresh=None,
+        fod_power=None, curv_sigma=None, probe_radius=None, sift2=False, arbor=False,
+        arbor_branches=5, save_transitions=False):
     """Segment pyAFQ's bundles with MPAT.
 
     afq         ``ParticipantAFQ`` or ``GroupAFQ`` (every participant in turn)
@@ -693,13 +698,34 @@ def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angl
                 extra solve), the bundle's share of them (<bundle>_share) and its share of the
                 solved bundles' streamlines (<bundle>_share_of_bundles).  For fixel-based
                 analysis without tractography.
+    ptt         use Parallel Transport Tractography (PTT) defaults (fod_thresh=0.08,
+                fod_power=1.5, curv_sigma=18.0, probe_radius=0.5, stop_mass=1e-4) unless
+                explicitly overridden.
+    step        hop length in voxels (of the smallest voxel side; default 1.0).
+    stop_mass   MITTENS stopping regularizer tau (default 1e-4 if ptt else 0.0).
+    fod_thresh  relative fODF floor (default 0.08 if ptt else 0.05).
+    fod_power   fODF sharpening exponent p (default 1.5 if ptt else 1.0).
+    curv_sigma  PTT parallel-transport curvature & co-circularity sigma in degrees (default
+                18.0 if ptt else 0.0; 0 = flat cone).
+    probe_radius  PTT cylindrical probe radius in voxels (default 0.5 if ptt else 0.0).
+    sift2       calibrate seed launch weights globally with path-consistent SIFT2
+                (mpat.quantify.sift2_optimize_launches) before bundle segmentation.
+    arbor       also extract and write 3-D multi-branch cross-section ridge arbors
+                (<stem>_bundle-<Name>_desc-arbor.{trx,json,tsv}) for each bundle.
+    arbor_branches  maximum cortical endpoint branches per side for arbor extraction (default 5).
+    save_transitions  persist transition probabilities: False/None (default), "odx" (or True)
+                for <stem>_desc-transitions_dwimap.odx, "nifti" for 4-D NIfTI + codi/coasy maps,
+                or "both".
     Returns {bundle: BundleResult} (a dict per participant for a GroupAFQ)."""
     import numba
 
     if hasattr(afq, "pAFQ_list"):
         kw = dict(cores=cores, viz=viz, synthseg_thalamus=synthseg_thalamus, max_length=max_length,
                   viz_rois=viz_rois, no_midline=no_midline, midline_tol=midline_tol,
-                  verbose=verbose, fornix=fornix, flux=flux, fixels=fixels, viz_colormap=viz_colormap)
+                  verbose=verbose, fornix=fornix, flux=flux, fixels=fixels, viz_colormap=viz_colormap,
+                  ptt=ptt, step=step, stop_mass=stop_mass, fod_thresh=fod_thresh, fod_power=fod_power,
+                  curv_sigma=curv_sigma, probe_radius=probe_radius, sift2=sift2, arbor=arbor,
+                  arbor_branches=arbor_branches, save_transitions=save_transitions)
         return {f"sub-{s}_ses-{t}": run(p, n_proc, max_mem, bundles, moments, tol, angle, double_odf, **kw,
                                         out_dir=out_dir and str(Path(out_dir) / f"sub-{s}" / f"ses-{t}"))
                 for s, t, p in zip(afq.valid_sub_list, afq.valid_ses_list, afq.pAFQ_list)}
@@ -725,7 +751,17 @@ def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angl
         # (the solve keeps what it needs, so the ROIs can go)
         yield from roi_specs(afq, sh_img, transient, stem, bundles, thal, no_midline, midline_tol, fornix)
 
-    cfg = ChainConfig(angle=angle, double_odf=double_odf, moments=moments)
+    cfg = ChainConfig(
+        angle=angle,
+        step=step,
+        double_odf=double_odf,
+        moments=moments,
+        stop_mass=(1e-4 if ptt else 0.0) if stop_mass is None else float(stop_mass),
+        fod_thresh=(0.08 if ptt else 0.05) if fod_thresh is None else float(fod_thresh),
+        fod_power=(1.5 if ptt else 1.0) if fod_power is None else float(fod_power),
+        curv_sigma=(18.0 if ptt else 0.0) if curv_sigma is None else float(curv_sigma),
+        probe_radius=(0.5 if ptt else 0.0) if probe_radius is None else float(probe_radius),
+    )
     with clock("fODF load"):
         sh = np.asarray(sh_img.dataobj, np.float32)
     with clock("chain build / cache"):
@@ -734,9 +770,11 @@ def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angl
     with clock("pyAFQ inputs"):
         seeds = np.argwhere((_on_grid(nib.load(afq.export("wm_gm_interface")), sh_img, 0) > 0) & transient)
     t_ol = time.perf_counter()
+    surv_state = None
     if max_length and max_length > 0:
         t1_ = time.time()
         kill, surv, T = overlength_states(chain, max_length, sh_img.header.get_zooms()[:3])
+        surv_state = surv
         vox = surv.reshape(-1, chain.nb)
         nib.save(nib.Nifti1Image(chain.to_volume(vox.max(1)), sh_img.affine), f"{stem}_desc-overlength_map.nii.gz")
         chain.kill = kill if kill.any() else None
@@ -762,14 +800,45 @@ def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angl
 
     budget = _budget(max_mem, chain, launches)
     from .fixels import segment_lobes
-    from .quantify import quantify_bundle
+    from .quantify import quantify_bundle, sift2_optimize_launches
 
     t_ijk = np.stack(np.unravel_index(chain.t_lin, chain.pshape), 1) - 1
     sh_rows = sh[tuple(t_ijk.T)]
     with clock("whole-brain reference & lobes"):
         lobes = segment_lobes(sh_rows, chain.geo)
+        if sift2 and not moments:
+            vox_vol = float(np.abs(np.linalg.det(sh_img.affine[:3, :3])))
+            launches, s2_info = sift2_optimize_launches(
+                chain, launches, sh_rows, lobes=lobes, tol=max(tol, 1e-5), vox_vol_mm3=vox_vol
+            )
+            log.info(
+                "SIFT2 launch optimization: fixel AFD R^2 %.3f -> %.3f (r=%.3f)",
+                s2_info["initial_fit"]["r2"],
+                s2_info["final_fit"]["r2"],
+                s2_info["final_fit"]["pearson_r"],
+            )
         whole = segment_bundles(chain, [dict(name="whole brain")], launches, tol=tol, max_mem=budget,
                                 on_trapped=trapped)["whole brain"]
+
+    if save_transitions:
+        st_mode = "odx" if save_transitions is True else str(save_transitions).strip().lower()
+        with clock("save transitions"):
+            if st_mode in ("odx", "both"):
+                odx_out = f"{stem}_desc-transitions_dwimap.odx"
+                chain.save_odx(
+                    odx_out,
+                    affine=sh_img.affine,
+                    sh_rows=sh_rows,
+                    lobes=lobes,
+                    launches=launches,
+                    whole_dc=whole.density_class,
+                    surv=surv_state,
+                    max_length_mm=max_length,
+                )
+                log.info("transitions ODX written to %s", odx_out)
+            if st_mode in ("nifti", "both"):
+                nii_paths = chain.save_nifti(stem, affine=sh_img.affine)
+                log.info("transitions NIfTI written to %s", nii_paths["transitions"])
 
     def write(res):
         name = re.sub(r"[^A-Za-z0-9]", "", res.name)
@@ -852,6 +921,10 @@ def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angl
         from .core import write_cores
         with clock("cores"):
             write_cores(out)
+    if arbor:
+        from .branches import write_arbors
+        with clock("arbors"):
+            write_arbors(out, max_end_branches=int(arbor_branches), max_lateral_offshoots=int(arbor_branches) + 1)
     t_viz = time.perf_counter()
     if viz:
         try:

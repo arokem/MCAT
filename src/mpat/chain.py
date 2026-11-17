@@ -250,11 +250,28 @@ class Chain:
         return h.hexdigest()
 
     def _save_cache(self, path, fp):
+        if str(path).endswith((".odx", ".odxd")):
+            from .transitions import save_transitions_odx
+
+            save_transitions_odx(self, path, fingerprint=fp, quantize_weights=False)
+            return
         np.savez(path, fingerprint=np.array(fp), **{k: getattr(self, k) for k in self._CACHE_KEYS})
 
     def _load_cache(self, path, fp):
         if not Path(path).exists():
             return False
+        if str(path).endswith((".odx", ".odxd")):
+            from .transitions import load_transitions_odx
+
+            try:
+                loaded = load_transitions_odx(path, fingerprint=fp)
+            except Exception:  # noqa: BLE001
+                log.info("cache %s does not match the inputs; rebuilding", path)
+                return False
+            for k in self._CACHE_KEYS:
+                setattr(self, k, getattr(loaded, k))
+            log.info("loaded transitions from %s", path)
+            return True
         z = np.load(path)
         if str(z["fingerprint"]) != fp or any(k not in z.files for k in self._CACHE_KEYS):
             log.info("cache %s does not match the inputs; rebuilding", path)
@@ -263,6 +280,32 @@ class Chain:
             setattr(self, k, z[k])
         log.info("loaded transitions from %s", path)
         return True
+
+    def save_odx(self, path, affine=None, **kwargs):
+        """Persist this chain's transitions, fixel lobes and per-voxel metrics to an ``.odx`` archive."""
+        from .transitions import save_transitions_odx
+
+        return save_transitions_odx(self, path, affine=affine, **kwargs)
+
+    @classmethod
+    def load_odx(cls, path, return_extras=False):
+        """Load a :class:`Chain` directly from an ``.odx`` archive without needing the fODF NIfTI."""
+        from .transitions import load_transitions_odx
+
+        return load_transitions_odx(path, return_extras=return_extras)
+
+    def save_nifti(self, prefix, affine=None):
+        """Write 4-D ``(X, Y, Z, 26)`` voxel-to-neighbour transition NIfTI + ``codi``/``coasy`` maps."""
+        from .transitions import save_transitions_nifti
+
+        return save_transitions_nifti(self, prefix, affine=affine)
+
+    @classmethod
+    def from_nifti(cls, nifti_path_or_prefix, absorb_class=None):
+        """Build a 26-class :class:`Chain` from a 4-D ``(X, Y, Z, 26)`` transition NIfTI."""
+        from .transitions import load_transitions_nifti
+
+        return load_transitions_nifti(nifti_path_or_prefix, absorb_class=absorb_class)
 
     # ------------------------------------------------------------------ seeds
     def lin(self, ijk):
