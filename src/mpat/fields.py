@@ -199,20 +199,35 @@ def endpoint_patches(endpoints, sigma_vox=2.5, min_share=0.02, prominence=0.2):
     two ends.  Patches pooled over many subjects in a template space are more stable than
     one subject's (docs/fields.md)."""
     from scipy import ndimage as ndi
-    from skimage.feature import peak_local_max
-    from skimage.segmentation import watershed
 
     vol = np.clip(np.nan_to_num(np.asarray(endpoints, np.float64)), 0, None)
     blur = ndi.gaussian_filter(vol, sigma_vox)
     if blur.max() <= 0:
         return np.zeros(vol.shape, np.int16), []
     sup = blur > 0.01 * blur.max()
-    peaks = peak_local_max(blur, min_distance=3, threshold_abs=0.01 * blur.max(),
-                           labels=sup.astype(int), exclude_border=False)
-    markers = np.zeros(vol.shape, int)
-    for k, p in enumerate(peaks):
-        markers[tuple(p)] = k + 1
-    ws = watershed(-blur, markers, mask=sup)
+    try:
+        from skimage.feature import peak_local_max
+        from skimage.segmentation import watershed
+
+        peaks = peak_local_max(blur, min_distance=3, threshold_abs=0.01 * blur.max(),
+                               labels=sup.astype(int), exclude_border=False)
+        markers = np.zeros(vol.shape, int)
+        for k, p in enumerate(peaks):
+            markers[tuple(p)] = k + 1
+        ws = watershed(-blur, markers, mask=sup)
+    except ImportError:
+        loc_max = (blur == ndi.maximum_filter(blur, size=7)) & sup
+        lbl_pk, n_pk = ndi.label(loc_max)
+        peaks = []
+        for k in range(1, n_pk + 1):
+            pts = np.argwhere(lbl_pk == k)
+            peaks.append(pts[np.argmax(blur[tuple(pts.T)])])
+        peaks = np.asarray(peaks, dtype=int).reshape(-1, 3)
+        ws = np.zeros(vol.shape, dtype=int)
+        if len(peaks) > 0:
+            sup_ijk = np.argwhere(sup)
+            dists = ((sup_ijk[:, None, :] - peaks[None, :, :]) ** 2).sum(-1)
+            ws[tuple(sup_ijk.T)] = np.argmin(dists, axis=1) + 1
     npk = len(peaks)
     pk = np.concatenate([[0.0], [blur[tuple(p)] for p in peaks]])
     mass = np.bincount(ws.ravel(), weights=vol.ravel(), minlength=npk + 1)

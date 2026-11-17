@@ -139,7 +139,8 @@ def _crawling(hist, it, tol, window=10):
     return 0 < q1 < 1 and abs(q1 - q0) < 0.02 and np.log(tol / hist[-1]) / np.log(q1) > TAIL_SWITCH_AFTER
 
 
-def solve_series(mul, x0, mask, tol, max_iter, what, ncomp=1, verbose=False, accel=False, krylov=True):
+def solve_series(mul, x0, mask, tol, max_iter, what, ncomp=1, verbose=False, accel=False, krylov=True,
+                 on_step=None):
     """total = sum_t (M A)^t x0 per column (M = diag(mask)), A x = mul(x, out), by power
     iteration until the remaining mass (mass rows, relative to the largest column's start) is
     below ``tol``.  Stops early when it stalls (mass circulating in states that almost never
@@ -147,6 +148,8 @@ def solve_series(mul, x0, mask, tol, max_iter, what, ncomp=1, verbose=False, acc
     ``verbose``: log the time per step (matrix product / masking and summing) every 100 steps.
     ``accel``: False (default), True / "mr" (invariant-preserving Periodic Minimal Residual
     extrapolation), or "aitken" (scalar Aitken delta-squared extrapolation).
+    ``on_step``: optional callback ``on_step(it, res, total, term)`` invoked after each iteration
+        (``term``: that iteration's term of the series, i.e. the current wavefront).
     Returns (total, info)."""
     t_start = time.perf_counter()
     t_mul = t_acc = 0.0
@@ -200,6 +203,8 @@ def solve_series(mul, x0, mask, tol, max_iter, what, ncomp=1, verbose=False, acc
         term, nxt = nxt, term
         hist.append(res)
         info.update(iterations=it, residual=res)
+        if on_step is not None:
+            on_step(it, res, total, term)
         if it % 100 == 0:
             log.info("  %s step %d: remaining mass %.2e", what, it, res)
             if verbose:
@@ -481,9 +486,10 @@ def _trapped(chain, info, what, names, on_trapped):
     on_trapped(what, names, vol)
 
 
-def _solve(chain, x0, mask, tol, max_iter, what, verbose=False, accel=False):
+def _solve(chain, x0, mask, tol, max_iter, what, verbose=False, accel=False, on_step=None):
     mul = chain.mul_forward if what == "forward" else chain.mul_backward
-    return solve_series(mul, x0, mask, tol, max_iter, what, chain.ncomp, verbose, accel=accel, krylov=False)
+    return solve_series(mul, x0, mask, tol, max_iter, what, chain.ncomp, verbose, accel=accel, krylov=False,
+                        on_step=on_step)
 
 
 def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, verbose=False, clock=None,
