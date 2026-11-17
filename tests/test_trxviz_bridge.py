@@ -4,6 +4,7 @@ from pathlib import Path
 
 import nibabel as nib
 import numpy as np
+import pytest
 
 from mpat.trxviz_bridge import cmd_build_transitions, cmd_solve_bundle
 
@@ -134,6 +135,15 @@ def test_trxviz_bridge_transitions_and_custom_rois(tmp_path: Path):
     assert res_direct["state_path"] == res_trans["state_path"]
     assert "Loaded [mpat_transitions_" in res_direct["summary"]
 
+    # Prebuilt transitions keep their settings: asking for others is an error, not silently ignored
+    req_other = tmp_path / "req_other.json"
+    req_other.write_text(
+        json.dumps({"out_dir": str(tmp_path / "other"), "working_dir": res_trans["state_path"],
+                    "preset": "ptt", "angle_deg": 60.0})
+    )
+    with pytest.raises(ValueError, match="angle"):
+        cmd_build_transitions(str(req_other))
+
     # Prepare start, end, include, avoid, and interior absorption ROI masks
     start_mask = np.zeros((nx, ny, nz), dtype=np.uint8)
     start_mask[1, 3:-3, 1:-1] = 1
@@ -244,3 +254,32 @@ def test_trxviz_bridge_transitions_and_custom_rois(tmp_path: Path):
     ep_vol3 = np.asarray(nib.load(res_s3["volumes"]["endpoints"]).dataobj)
     # Verify walkers absorbed inside the interior term_mask (i=6..7)
     assert float(ep_vol3[6:8, 3:-3, 1:-1].sum()) > 0.5
+
+
+def test_trxviz_bridge_inputs_are_not_guessed(tmp_path: Path):
+    from mpat.trxviz_bridge import _discover_subject_inputs
+
+    nx, ny, nz = 8, 6, 4
+    affine = np.diag([2.0, 2.0, 2.0, 1.0])
+    sh = np.zeros((nx, ny, nz, 45), dtype=np.float32)
+    sh[1:-1, 1:-1, 1:-1] = _sh([(1.0, 0.0, 0.0)])
+    transient = np.zeros((nx, ny, nz), dtype=bool)
+    transient[2:-2, 2:-2, 1:-1] = True
+    absorb = np.where(sh.any(-1) & ~transient, 1, 0).astype(np.int8)
+
+    # A folder's chain cache (sorted first here) is not mistaken for the staged subject
+    folder = tmp_path / "subject"
+    folder.mkdir()
+    np.savez(folder / "sub-01_desc-chain_cache.npz", Q_ptr=np.zeros(3))
+    np.savez(folder / "sub-01_staged.npz", sh=sh, affine=affine, zooms=np.array([2.0, 2.0, 2.0]),
+             transient=transient, absorb=absorb)
+    assert np.array_equal(_discover_subject_inputs(str(folder), None)[3], transient)
+
+    # An fODF without tissue maps is an error, not a guess at which voxels are white matter
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    nib.save(nib.Nifti1Image(sh, affine), str(bare / "sub-01_model-csd_dwimap.nii.gz"))
+    req = tmp_path / "req.json"
+    req.write_text(json.dumps({"out_dir": str(tmp_path / "out"), "working_dir": str(bare)}))
+    with pytest.raises(ValueError, match="No tissue maps"):
+        cmd_build_transitions(str(req))

@@ -61,6 +61,7 @@ class LiveDensityStreamer:
         self.t_ijk = tuple((np.stack(np.unravel_index(chain.t_lin, chain.pshape), 1) - 1).T)
         self.seq = 0
         self.min_interval_sec = float(min_interval_sec)
+        self.pace_sec = 0.0  # seconds to pause after each frame so the animation is watchable
         self._last_emit = 0.0
 
         with open(self.path, "wb") as fh:
@@ -154,6 +155,18 @@ def _resample_mask_to_grid(mask_img: nib.Nifti1Image, shape: Tuple[int, int, int
     return resampled > 0
 
 
+_STAGED_SUBJECT_KEYS = {"sh", "affine", "zooms", "transient", "absorb"}
+
+
+def _is_staged_subject_npz(path) -> bool:
+    """True for an .npz holding a staged subject (fODF SH plus tissue classes)."""
+    try:
+        with np.load(path) as z:
+            return _STAGED_SUBJECT_KEYS.issubset(z.files)
+    except Exception:  # noqa: BLE001 - unreadable or not an npz: not a subject bundle
+        return False
+
+
 def _discover_subject_inputs(
     working_dir: Optional[str],
     odx_path: Optional[str],
@@ -161,31 +174,31 @@ def _discover_subject_inputs(
 ) -> Tuple[np.ndarray, np.ndarray, Tuple[float, float, float], np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """Resolve ``(sh, affine, zooms, transient, absorb_class, dseg, wmgm_mask)`` from
     either a staged ``.npz`` bundle, a pyAFQ/MPAT directory, or an ``.odx``/``.fib.gz``/``.nii.gz`` file.
+    ``transient``, ``absorb_class`` and ``dseg`` are None when no tissue maps were found.
     """
     from .afq import _on_grid
 
     # Case 1: working_dir or odx_path points directly to a staged .npz subject file
     for cand in (working_dir, odx_path):
-        if cand and Path(cand).is_file() and str(cand).endswith(".npz"):
+        if cand and Path(cand).is_file() and str(cand).endswith(".npz") and _is_staged_subject_npz(cand):
             z = np.load(cand)
-            if "sh" in z.files and "transient" in z.files and "absorb" in z.files:
-                sh = np.asarray(z["sh"], dtype=np.float32)
-                affine = np.asarray(z["affine"], dtype=np.float64)
-                zooms = tuple(float(x) for x in z["zooms"][:3])
-                transient = np.asarray(z["transient"], dtype=bool)
-                absorb = np.asarray(z["absorb"], dtype=np.int8)
-                dseg = (
-                    np.asarray(z["dseg"], dtype=np.uint8)
-                    if "dseg" in z.files
-                    else np.where(transient, 1, np.where(absorb > 0, absorb + 1, 0)).astype(np.uint8)
-                )
-                wmgm = None
-                if "seeds" in z.files:
-                    wmgm = np.zeros(transient.shape, dtype=bool)
-                    seeds = np.asarray(z["seeds"], dtype=np.int64)
-                    if seeds.ndim == 2 and seeds.shape[1] == 3 and len(seeds) > 0:
-                        wmgm[tuple(seeds.T)] = True
-                return sh, affine, zooms, transient, absorb, dseg, wmgm
+            sh = np.asarray(z["sh"], dtype=np.float32)
+            affine = np.asarray(z["affine"], dtype=np.float64)
+            zooms = tuple(float(x) for x in z["zooms"][:3])
+            transient = np.asarray(z["transient"], dtype=bool)
+            absorb = np.asarray(z["absorb"], dtype=np.int8)
+            dseg = (
+                np.asarray(z["dseg"], dtype=np.uint8)
+                if "dseg" in z.files
+                else np.where(transient, 1, np.where(absorb > 0, absorb + 1, 0)).astype(np.uint8)
+            )
+            wmgm = None
+            if "seeds" in z.files:
+                wmgm = np.zeros(transient.shape, dtype=bool)
+                seeds = np.asarray(z["seeds"], dtype=np.int64)
+                if seeds.ndim == 2 and seeds.shape[1] == 3 and len(seeds) > 0:
+                    wmgm[tuple(seeds.T)] = True
+            return sh, affine, zooms, transient, absorb, dseg, wmgm
 
     # Case 2: working_dir is a directory (pyAFQ derivatives or folder with NIfTIs / .npz)
     sh_img = None
@@ -196,10 +209,11 @@ def _discover_subject_inputs(
 
     if working_dir and Path(working_dir).is_dir():
         wdir = Path(working_dir)
-        # Check if there is a staged subject .npz in the folder
-        npz_files = sorted(wdir.glob("*sub*.npz"))
-        if npz_files:
-            return _discover_subject_inputs(str(npz_files[0]), None, wm_threshold=wm_threshold)
+        # A staged subject .npz holds sh/transient/absorb arrays; other .npz files in the folder
+        # (chain caches, transition caches) are not inputs.
+        for npz_path in sorted(wdir.glob("*.npz")):
+            if _is_staged_subject_npz(npz_path):
+                return _discover_subject_inputs(str(npz_path), None, wm_threshold=wm_threshold)
 
         all_niis = sorted(wdir.rglob("*.nii*"))
         for p in all_niis:
@@ -296,6 +310,8 @@ def _discover_subject_inputs(
 
     if pve_img is not None:
         csf, gm, wm = np.moveaxis(_on_grid(pve_img, sh_img), -1, 0)
+        from skimage.segmentation import find_boundaries
+
         edge = find_boundaries(mask, mode="inner") & mask
         transient = mask & ~edge & (wm > float(wm_threshold))
         absorb = np.zeros(mask.shape, np.int8)
@@ -326,19 +342,12 @@ def _discover_subject_inputs(
         absorb[dseg == 4] = 3
         absorb[dseg == 5] = 2
     else:
-        # Derive transient WM and absorbing boundary directly from the ODF mask & c0 amplitude
-        edge = mask & ~ndi.binary_erosion(mask)
-        c0 = sh[..., 0]
-        pos_c0 = c0[mask & ~edge]
-        thresh = float(np.percentile(pos_c0, 20.0)) if pos_c0.size else 0.0
-        transient = mask & ~edge & (c0 >= thresh)
-        absorb = np.zeros(mask.shape, dtype=np.int8)
-        absorb[mask & ~transient] = 1
-        absorb[edge] = 3
-        dseg = np.where(transient, 1, np.where(absorb > 0, absorb + 1, 0)).astype(np.uint8)
+        # No tissue maps: the caller has to supply a white-matter mask. Guessing tissue classes
+        # from the fODF would make arbitrary voxels (deep white matter included) valid endpoints.
+        transient = absorb = dseg = None
 
     wmgm = None
-    if wmgm_img is not None:
+    if wmgm_img is not None and transient is not None:
         wmgm = (_on_grid(wmgm_img, sh_img, order=0) > 0) & transient
 
     return sh, affine, zooms, transient, absorb, dseg, wmgm
@@ -406,12 +415,141 @@ def _export_volumes_from_cached_state(
     return volume_paths, shape, affine, n_wm, n_states, n_trans
 
 
-def cmd_build_transitions(req_path: str) -> None:
-    """Execute ``build_transitions`` and emit ``RESULT <json>``."""
+MAP_KEYS = (
+    "codi_double",
+    "codi_single",
+    "coasy",
+    "p_terminate_double",
+    "p_terminate_single",
+    "total_amplitude",
+    "kl_single",
+)
+
+
+def _requested_config(req: Dict[str, Any]):
+    """The chain settings a build_transitions request asks for, and its maximum length (mm)."""
+    from .chain import ChainConfig
+
+    ptt = str(req.get("preset", "standard")).lower() == "ptt"
+    cfg = ChainConfig(
+        angle=float(req.get("angle_deg", 35.0)),
+        step=float(req.get("step_vox", 1.0)),
+        double_odf=bool(req.get("double_odf", True)),
+        stop_mass=float(req.get("stop_mass_tau", 1e-4 if ptt else 0.0)),
+        fod_thresh=float(req.get("fod_thresh", 0.08 if ptt else 0.05)),
+        fod_power=float(req.get("fod_power", 1.5 if ptt else 1.0)),
+        curv_sigma=float(req.get("curv_sigma_deg", 18.0 if ptt else 0.0)),
+        probe_radius=float(req.get("probe_radius_vox", 0.5 if ptt else 0.0)),
+    )
+    return cfg, float(req.get("max_length_mm", 250.0))
+
+
+# build_transitions request keys for each ChainConfig field
+_REQUEST_KEYS = {
+    "angle": "angle_deg",
+    "step": "step_vox",
+    "double_odf": "double_odf",
+    "stop_mass": "stop_mass_tau",
+    "fod_thresh": "fod_thresh",
+    "fod_power": "fod_power",
+    "curv_sigma": "curv_sigma_deg",
+    "probe_radius": "probe_radius_vox",
+}
+
+
+def _check_prebuilt(source, stored_cfg: Dict[str, Any], stored_max_length, req, cfg, max_length_mm) -> None:
+    """Prebuilt transitions keep the settings they were built with. Refuse a request that asks for
+    other settings or for tissue-mask overrides instead of silently ignoring them. A request that
+    names a preset asks for every setting (the preset fills the gaps); otherwise only the settings
+    it names are checked."""
+    import math
+    from dataclasses import asdict
+
+    from .chain import ChainConfig
+
+    valid = {f for f in ChainConfig.__dataclass_fields__}
+    built = asdict(ChainConfig(**{k: v for k, v in stored_cfg.items() if k in valid}))
+    wanted = asdict(cfg)
+    problems = []
+    for key, want in wanted.items():
+        if key not in _REQUEST_KEYS or ("preset" not in req and _REQUEST_KEYS[key] not in req):
+            continue
+        have = built[key]
+        if isinstance(want, (bool, str)) or isinstance(have, (bool, str)):
+            same = have == want
+        else:
+            same = math.isclose(float(have), float(want), rel_tol=1e-4, abs_tol=1e-6)
+        if not same:
+            problems.append(f"{key} is {have} in the file but {want} was requested")
+    if stored_max_length is not None and "max_length_mm" in req and not math.isclose(
+        float(stored_max_length), float(max_length_mm), rel_tol=1e-4
+    ):
+        problems.append(f"max length is {stored_max_length} mm in the file but {max_length_mm} mm was requested")
+    for key, label in (("transient_mask_path", "transient WM mask"), ("absorb_mask_path", "absorbing mask")):
+        if req.get(key):
+            problems.append(f"a {label} can't be applied to prebuilt transitions")
+    if problems:
+        raise ValueError(
+            f"{Path(source).name} holds prebuilt transitions with fixed settings: "
+            + "; ".join(problems)
+            + ". Match the node's settings to the file, or point the node at the subject's fODF to "
+            "build new transitions."
+        )
+
+
+def _is_transitions_odx(path) -> bool:
+    """True for an ODX written by mpat (it carries the chain's stencil arrays), False for a plain fODF ODX."""
+    import zipfile
+
+    p = Path(path)
+    if p.is_dir():
+        return any((p / "groups").glob("mpat_Q_ptr.*"))
+    try:
+        with zipfile.ZipFile(p) as z:
+            return any(n.startswith("groups/mpat_Q_ptr") for n in z.namelist())
+    except zipfile.BadZipFile:
+        return False
+
+
+def _mittens_maps(sh_rows: np.ndarray, ijk: np.ndarray, shape, affine: np.ndarray, zooms, cfg):
+    """MITTENS transition maps (``MAP_KEYS``) for voxels ``ijk`` with fODF SH rows ``sh_rows``.
+    Returns ``(ijk, {key: values})`` for the voxels MITTENS fitted."""
     import mittens
     from mittens.io import OdfData
 
-    from .chain import Chain, ChainConfig
+    n_coef = int(sh_rows.shape[1])
+    sym_order = int(round((-3.0 + np.sqrt(1.0 + 8.0 * n_coef)) / 2.0))
+    if (sym_order + 1) * (sym_order + 2) // 2 == n_coef:
+        sh_order, full_basis = sym_order, False
+    else:
+        sh_order, full_basis = int(round(np.sqrt(n_coef) - 1.0)), True
+    odf_data = OdfData.from_sh(
+        sh_rows, ijk, tuple(shape), affine, sh_order=sh_order, sh_basis="descoteaux07", full_basis=full_basis
+    )
+    step_mm = float(cfg.step * min(zooms))
+    sigma_rad = max(np.deg2rad(cfg.curv_sigma), 0.05)
+    model = mittens.TransitionModel(
+        step_mm=step_mm,
+        angle_max=cfg.angle,
+        turning="vmf" if cfg.curv_sigma > 0.0 else "flat",
+        persistence_length_mm=float(step_mm * sigma_rad**2),
+        tau=cfg.stop_mass,
+        tau0=cfg.stop_mass,
+        odf_power=cfg.fod_power,
+    )
+    fit = model.fit(odf_data)
+    maps = dict(fit.maps())
+    maps["kl_single"] = fit.kl_single
+    clean = {
+        k: np.nan_to_num(np.asarray(maps[k], dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0) for k in MAP_KEYS
+    }
+    return np.asarray(fit.ijk), clean
+
+
+def cmd_build_transitions(req_path: str) -> None:
+    """Execute ``build_transitions`` and emit ``RESULT <json>``."""
+
+    from .chain import Chain
     from .fixels import segment_lobes
     from .solve import overlength_states, prepare_launches, segment_bundles
 
@@ -423,6 +561,7 @@ def cmd_build_transitions(req_path: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     _emit_progress(1, 6)
+    cfg, max_length_mm = _requested_config(req)
 
     # Fast path 0: Did the user point working_dir or odx_path directly at a precomputed
     # mpat_transitions_*.npz (or *_transitions_dwimap.odx) archive?
@@ -432,6 +571,9 @@ def cmd_build_transitions(req_path: str) -> None:
         if Path(direct_cand).is_file() and str(direct_cand).endswith(".npz"):
             z_try = np.load(direct_cand)
             if "Q_ptr" in z_try.files and "L_seeds" in z_try.files and "shape" in z_try.files:
+                if "cfg_json" not in z_try.files:
+                    raise ValueError(f"{Path(direct_cand).name} does not record the settings it was built with")
+                _check_prebuilt(direct_cand, json.loads(str(z_try["cfg_json"])), None, req, cfg, max_length_mm)
                 _emit_progress(5, 6)
                 volume_paths, shape, affine, n_wm, n_states, n_trans = _export_volumes_from_cached_state(
                     z_try, out_dir
@@ -454,61 +596,59 @@ def cmd_build_transitions(req_path: str) -> None:
                     json.dump(result, fh, indent=2)
                 print(f"RESULT {json.dumps(result)}", flush=True)
                 return
-        elif str(direct_cand).endswith((".odx", ".odxd")):
+        elif str(direct_cand).endswith((".odx", ".odxd")) and _is_transitions_odx(direct_cand):
+            # Transitions written by mpat: reuse the chain as built. A plain fODF ODX falls through
+            # to the full build below.
             from .transitions import load_transitions_odx
 
-            try:
-                chain_odx, extras = load_transitions_odx(direct_cand, return_extras=True)
-            except Exception:  # noqa: BLE001
-                chain_odx, extras = None, None
-            if chain_odx is not None and extras is not None and "launches" in extras:
-                _emit_progress(5, 6)
-                affine = extras["affine"]
-                shape = chain_odx.shape
-                dpv = extras.get("dpv") or {}
-                volume_paths = {}
-                for map_key, fallback_key in (
-                    ("codi_double", "codi"),
-                    ("codi_single", "codi"),
-                    ("coasy", "coasy"),
-                    ("p_terminate_double", "p_absorb"),
-                    ("p_terminate_single", "p_absorb"),
-                    ("total_amplitude", "p_absorb"),
-                    ("kl_single", "codi"),
-                ):
-                    vals = dpv.get(map_key)
-                    if vals is None:
-                        vals = dpv.get(fallback_key, np.zeros(chain_odx.t_lin.size, dtype=np.float32))
-                    vol = chain_odx.to_volume(np.asarray(vals, dtype=np.float32).ravel())
-                    volume_paths[map_key] = _save_nifti(vol, affine, out_dir / f"{map_key}.nii")
-                dead_mean = dpv.get(
-                    "dead_mean",
-                    chain_odx.dead.reshape(-1, chain_odx.nb).mean(axis=1).astype(np.float32),
-                )
-                volume_paths["chain_dead"] = _save_nifti(
-                    chain_odx.to_volume(np.asarray(dead_mean, dtype=np.float32).ravel()),
-                    affine,
-                    out_dir / "chain_dead.nii",
-                )
-                _emit_progress(6, 6)
-                elapsed = time.perf_counter() - t_start
-                fp_h = str((extras["header"].get("mpat") or {}).get("fingerprint", ""))
-                result = {
-                    "state_path": str(Path(direct_cand).resolve()),
-                    "fp_hash": fp_h,
-                    "dims": list(shape),
-                    "voxel_to_ras": affine.tolist(),
-                    "volumes": volume_paths,
-                    "summary": (
-                        f"Loaded ODX [{Path(direct_cand).name}]: "
-                        f"{chain_odx.t_lin.size:,} WM voxels ({chain_odx.n_states:,} states, "
-                        f"{chain_odx.n_transitions / 1e6:.1f}M transitions) in {elapsed:.1f}s"
-                    ),
-                }
-                with open(out_dir / "transitions_result.json", "w") as fh:
-                    json.dump(result, fh, indent=2)
-                print(f"RESULT {json.dumps(result)}", flush=True)
-                return
+            name = Path(direct_cand).name
+            chain_odx, extras = load_transitions_odx(direct_cand, return_extras=True)
+            if "launches" not in extras:
+                raise ValueError(f"{name} has no seed launches; rewrite it with mpat run --save-transitions")
+            if extras.get("sh_rows") is None:
+                raise ValueError(f"{name} has no fODF SH coefficients to compute the transition maps from")
+            mpat_meta = extras["header"].get("mpat") or {}
+            _check_prebuilt(
+                direct_cand, mpat_meta.get("config") or {}, mpat_meta.get("max_length_mm"), req, cfg, max_length_mm
+            )
+            _emit_progress(4, 6)
+            affine = extras["affine"]
+            shape = chain_odx.shape
+            # The same MITTENS maps the full build computes, from the fODF stored in the ODX
+            # (white-matter voxels only: that is all the ODX keeps).
+            wm_ijk = np.stack(np.unravel_index(chain_odx.t_lin, chain_odx.pshape), 1) - 1
+            map_ijk, maps = _mittens_maps(extras["sh_rows"], wm_ijk, shape, affine, extras["zooms"], chain_odx.cfg)
+            volume_paths = {}
+            for map_key, vals in maps.items():
+                vol = np.zeros(shape, dtype=np.float32)
+                vol[tuple(map_ijk.T)] = vals
+                volume_paths[map_key] = _save_nifti(vol, affine, out_dir / f"{map_key}.nii")
+            dpv = extras.get("dpv") or {}
+            dead_mean = dpv.get("dead_mean")
+            if dead_mean is None:
+                dead_mean = chain_odx.dead.reshape(-1, chain_odx.nb).mean(axis=1)
+            volume_paths["chain_dead"] = _save_nifti(
+                chain_odx.to_volume(np.asarray(dead_mean, dtype=np.float32).ravel()),
+                affine,
+                out_dir / "chain_dead.nii",
+            )
+            _emit_progress(6, 6)
+            elapsed = time.perf_counter() - t_start
+            result = {
+                "state_path": str(Path(direct_cand).resolve()),
+                "fp_hash": str(mpat_meta.get("fingerprint", "")),
+                "dims": list(shape),
+                "voxel_to_ras": affine.tolist(),
+                "volumes": volume_paths,
+                "summary": (
+                    f"Loaded ODX [{name}]: {chain_odx.t_lin.size:,} WM voxels ({chain_odx.n_states:,} states, "
+                    f"{chain_odx.n_transitions / 1e6:.1f}M transitions) in {elapsed:.1f}s"
+                ),
+            }
+            with open(out_dir / "transitions_result.json", "w") as fh:
+                json.dump(result, fh, indent=2)
+            print(f"RESULT {json.dumps(result)}", flush=True)
+            return
 
     wm_threshold = float(req.get("wm_threshold", 0.4))
     sh, affine, zooms, transient, absorb, dseg, wmgm = _discover_subject_inputs(
@@ -516,15 +656,31 @@ def cmd_build_transitions(req_path: str) -> None:
         req.get("odx_path"),
         wm_threshold=wm_threshold,
     )
-    shape = tuple(int(d) for d in transient.shape)
+    shape = tuple(int(d) for d in sh.shape[:3])
+    fodf_mask = np.any(sh != 0, axis=-1)
 
-    # Apply optional user-wired transient or absorbing masks
+    # Optional user-wired transient (white-matter) mask
+    t_override = None
     if req.get("transient_mask_path") and Path(req["transient_mask_path"]).exists():
         t_override = _resample_mask_to_grid(nib.load(req["transient_mask_path"]), shape, affine)
-        if t_override.any():
-            transient = t_override & np.any(sh != 0, axis=-1)
-            absorb[transient] = 0
-            absorb[(absorb == 0) & np.any(sh != 0, axis=-1) & ~transient] = 1
+        if not t_override.any():
+            t_override = None
+    if transient is None:
+        if t_override is None:
+            raise ValueError(
+                "No tissue maps were found for this fODF (pyAFQ pve_internal, desc-mpat_dseg, or a staged "
+                "subject .npz). Wire a Transient WM Mask into the node, or point it at the subject's "
+                "pyAFQ folder."
+            )
+        edge = fodf_mask & ~ndi.binary_erosion(fodf_mask)
+        transient = t_override & fodf_mask & ~edge
+        absorb = np.zeros(shape, dtype=np.int8)
+        absorb[fodf_mask & ~transient] = 1
+        absorb[edge] = 3
+    elif t_override is not None:
+        transient = t_override & fodf_mask
+        absorb[transient] = 0
+        absorb[(absorb == 0) & fodf_mask & ~transient] = 1
 
     if req.get("absorb_mask_path") and Path(req["absorb_mask_path"]).exists():
         a_override = _resample_mask_to_grid(nib.load(req["absorb_mask_path"]), shape, affine)
@@ -534,27 +690,6 @@ def cmd_build_transitions(req_path: str) -> None:
 
     _emit_progress(2, 6)
 
-    preset = str(req.get("preset", "standard")).lower()
-    angle_deg = float(req.get("angle_deg", 35.0))
-    step_vox = float(req.get("step_vox", 1.0))
-    double_odf = bool(req.get("double_odf", True))
-    fod_thresh = float(req.get("fod_thresh", 0.08 if preset == "ptt" else 0.05))
-    fod_power = float(req.get("fod_power", 1.5 if preset == "ptt" else 1.0))
-    stop_mass_tau = float(req.get("stop_mass_tau", 1e-4 if preset == "ptt" else 0.0))
-    curv_sigma_deg = float(req.get("curv_sigma_deg", 18.0 if preset == "ptt" else 0.0))
-    probe_radius_vox = float(req.get("probe_radius_vox", 0.5 if preset == "ptt" else 0.0))
-    max_length_mm = float(req.get("max_length_mm", 250.0))
-
-    cfg = ChainConfig(
-        angle=angle_deg,
-        step=step_vox,
-        double_odf=double_odf,
-        stop_mass=stop_mass_tau,
-        fod_thresh=fod_thresh,
-        fod_power=fod_power,
-        curv_sigma=curv_sigma_deg,
-        probe_radius=probe_radius_vox,
-    )
     fp_hash = _compute_transitions_hash(cfg.key(), max_length_mm, sh, affine, transient, absorb)
     hashed_filename = f"mpat_transitions_{fp_hash}.npz"
 
@@ -616,60 +751,17 @@ def cmd_build_transitions(req_path: str) -> None:
             return
 
     # Full build path:
-    # 1. Compute MITTENS v2 transition probability maps across the active mask
-    min_zoom = float(min(zooms))
-    step_mm = float(step_vox * min_zoom)
-    turning = "vmf" if curv_sigma_deg > 0.0 else "flat"
-    sigma_rad = max(np.deg2rad(curv_sigma_deg), 0.05)
-    persistence_mm = float(step_mm * (sigma_rad ** 2))
-
-    odf_mask = (transient | (absorb == 1) | (absorb == 3)) & np.any(sh != 0, axis=-1)
+    # 1. MITTENS v2 transition probability maps across the fODF voxels that walkers use
+    odf_mask = (transient | (absorb == 1) | (absorb == 3)) & fodf_mask
     ijk_odf = np.argwhere(odf_mask)
-    n_coef = int(sh.shape[-1])
-    sh_order_sym = int(round((-3.0 + np.sqrt(1.0 + 8.0 * n_coef)) / 2.0))
-    if (sh_order_sym + 1) * (sh_order_sym + 2) // 2 == n_coef:
-        sh_order = sh_order_sym
-        full_basis = False
-    else:
-        sh_order = int(round(np.sqrt(n_coef) - 1.0))
-        full_basis = True
-    odf_data = OdfData.from_sh(
-        sh[tuple(ijk_odf.T)],
-        ijk_odf,
-        shape,
-        affine,
-        sh_order=sh_order,
-        sh_basis="descoteaux07",
-        full_basis=full_basis,
-    )
-    t_model = mittens.TransitionModel(
-        step_mm=step_mm,
-        angle_max=angle_deg,
-        turning=turning,
-        persistence_length_mm=persistence_mm,
-        tau=stop_mass_tau,
-        tau0=stop_mass_tau,
-        odf_power=fod_power,
-    )
-    t_res = t_model.fit(odf_data)
-    m_maps = dict(t_res.maps())
-    m_maps["kl_single"] = t_res.kl_single
+    map_ijk, maps = _mittens_maps(sh[tuple(ijk_odf.T)], ijk_odf, shape, affine, zooms, cfg)
 
     volume_paths: Dict[str, str] = {}
-    mit_arrays: Dict[str, np.ndarray] = {"mit_ijk": np.asarray(t_res.ijk, dtype=np.int32)}
-    for map_key in (
-        "codi_double",
-        "codi_single",
-        "coasy",
-        "p_terminate_double",
-        "p_terminate_single",
-        "total_amplitude",
-        "kl_single",
-    ):
-        vals = np.nan_to_num(np.asarray(m_maps[map_key], dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    mit_arrays: Dict[str, np.ndarray] = {"mit_ijk": map_ijk.astype(np.int32)}
+    for map_key, vals in maps.items():
         mit_arrays[f"mit_{map_key}"] = vals
         vol = np.zeros(shape, dtype=np.float32)
-        vol[tuple(t_res.ijk.T)] = vals
+        vol[tuple(map_ijk.T)] = vals
         volume_paths[map_key] = _save_nifti(vol, affine, out_dir / f"{map_key}.nii")
 
     _emit_progress(3, 6)
@@ -796,10 +888,8 @@ def _reconstruct_state(state_path: str):
     """Fast O(1) reconstruction of ``(chain, launches, default_seed_ok, sh_rows, lobes, whole_dc, affine, zooms)``
     from ``mpat_transitions_*.npz`` or ``*_transitions_dwimap.odx`` without rebuilding geometry or ODF integrals.
     """
-    from . import kernel as K
     from .chain import Chain, ChainConfig
     from .fixels import Lobes, _sh_fingerprint, segment_lobes
-    from .geometry import build_geometry
     from .solve import Launches
 
     if str(state_path).endswith((".odx", ".odxd")):
@@ -913,6 +1003,68 @@ def _reconstruct_state(state_path: str):
     return chain, launches, default_seed_ok, sh_rows, lobes, whole_dc, affine, zooms
 
 
+def _stream_backward(streamer, chain, it, res, total, term, colsign, n_kinds, log_tol) -> None:
+    """Stream a backward-solve frame: the completion wavefront blended with the
+    waypoint-conditioned completion probability so far."""
+    if streamer is None or not (it == 1 or it % 2 == 0):
+        return
+    nc, nb, Nt = chain.ncomp, chain.nb, chain.t_lin.size
+    w_step = np.clip(term[::nc, :n_kinds].sum(1).reshape(Nt, nb).mean(1), 0.0, None)
+    w_max = float(w_step.max())
+    if w_max > 1e-20:
+        w_step = w_step / w_max
+    b_cond = np.clip((total[::nc] @ colsign).reshape(Nt, nb).mean(1), 0.0, None)
+    b_max = float(b_cond.max())
+    b_vis = 0.60 * (b_cond / b_max) + 0.40 * w_step if b_max > 1e-20 else w_step
+    streamer.emit_transient_values(b_vis, phase=1, step=it, residual=res, force=True)
+    frac = float(np.clip(np.log10(max(res, 1e-12)) / log_tol, 0.0, 1.0)) if log_tol < 0 else 0.5
+    _emit_progress(int(round(frac * 100)), 200)
+    if streamer.pace_sec > 0.0:
+        time.sleep(streamer.pace_sec)
+
+
+def _stream_forward(streamer, chain, it, res, total, term, beta, colsign, log_tol) -> None:
+    """Stream a forward-solve frame: the bundle density so far blended with this step's wavefront."""
+    if streamer is None or not (it == 1 or it % 2 == 0):
+        return
+    from . import kernel as K
+
+    nc, nb, Nt, Ns = chain.ncomp, chain.nb, chain.t_lin.size, chain.n_states
+    beta_c = beta if beta.flags.c_contiguous else np.ascontiguousarray(beta)
+
+    def density(x):
+        x = x if x.flags.c_contiguous else np.ascontiguousarray(x)
+        return np.clip(K.paired_density(x, beta_c, colsign, Ns, nc).reshape(Nt, nb).sum(1), 0.0, None)
+
+    d_tot, d_wave = density(total), density(term)
+    t_max, w_max = float(d_tot.max()), float(d_wave.max())
+    if t_max > 1e-20 and w_max > 1e-20:
+        d_vis = (0.70 * (d_tot / t_max) + 0.30 * (d_wave / w_max)) * t_max
+    else:
+        d_vis = d_tot
+    streamer.emit_transient_values(d_vis, phase=2, step=it, residual=res, force=True)
+    frac = float(np.clip(np.log10(max(res, 1e-12)) / log_tol, 0.0, 1.0)) if log_tol < 0 else 0.5
+    _emit_progress(100 + int(round(frac * 95)), 200)
+    if streamer.pace_sec > 0.0:
+        time.sleep(streamer.pace_sec)
+
+
+def _ends_outside_absorbers(chain, spec: Dict[str, Any]) -> bool:
+    """True when a start/end ROI touches no valid absorbing voxel (an ROI inside white matter).
+    Only the custom-region solver can end walks there."""
+    from .chain import VALID_ENDS
+
+    a_valid = np.isin(chain.a_class, np.asarray(VALID_ENDS))
+    for key in ("start", "end"):
+        m = spec.get(key)
+        if m is not None and np.any(m):
+            padded = np.zeros(chain.pshape, dtype=bool)
+            padded[1:-1, 1:-1, 1:-1] = m
+            if not np.any(padded.ravel()[chain.a_lin] & a_valid):
+                return True
+    return False
+
+
 def _solve_bundle_with_custom_regions(
     chain,
     launches,
@@ -921,10 +1073,12 @@ def _solve_bundle_with_custom_regions(
     no_end_mask: Optional[np.ndarray],
     tol: float = 1e-6,
     accel: Any = "mr",
-    use_cascade: bool = True,
     streamer: Optional[LiveDensityStreamer] = None,
 ):
-    """Solve a bundle specification with support for:
+    """Solve a bundle whose regions mpat.solve can't express: absorption inside white matter
+    (``term_mask``, or start/end ROIs that touch no valid absorbing voxel) and ``no_end_mask``.
+    Bundles without them go through :func:`mpat.solve.segment_bundles`, as in ``mpat run``.
+    Supports:
     - ``include`` (waypoint ROIs),
     - ``exclude`` (avoid ROIs + outside of limiting_mask),
     - ``start`` / ``end`` (endpoint ROIs),
@@ -1027,30 +1181,11 @@ def _solve_bundle_with_custom_regions(
 
     mask = p.mask.copy()
     r_rhs *= mask
-    Nt = chain.t_lin.size
     colsign = p.signs[p.xcol]
     log_tol = float(np.log10(max(tol, 1e-12)))
 
     def _on_bwd_step(it: int, res: float, total: np.ndarray, term: np.ndarray) -> None:
-        if streamer is not None and (it == 1 or it % 2 == 0):
-            # Wave front at power iteration step t from start & end ROIs (columns 0..nK)
-            w_step = np.clip(term[::nc, : p.nK].sum(1).reshape(Nt, nb).mean(1), 0.0, None)
-            w_max = float(w_step.max())
-            if w_max > 1e-20:
-                w_step = w_step / w_max
-            # Waypoint-conditioned accumulated backward hitting probability
-            b_cond = np.clip((total[::nc] @ colsign).reshape(Nt, nb).mean(1), 0.0, None)
-            b_max = float(b_cond.max())
-            if b_max > 1e-20:
-                b_cond = b_cond / b_max
-                b_vis = 0.60 * b_cond + 0.40 * w_step
-            else:
-                b_vis = w_step
-            streamer.emit_transient_values(b_vis, phase=1, step=it, residual=res, force=True)
-            frac = float(np.clip(np.log10(max(res, 1e-12)) / log_tol, 0.0, 1.0)) if log_tol < 0 else 0.5
-            _emit_progress(int(round(frac * 100)), 200)
-            if getattr(streamer, "pace_sec", 0.0) > 0.0:
-                time.sleep(streamer.pace_sec)
+        _stream_backward(streamer, chain, it, res, total, term, colsign, p.nK, log_tol)
 
     bwd_accel = False if (streamer is not None and getattr(streamer, "pace_sec", 0.0) > 0.0) else accel
     beta, info_b = _solve(
@@ -1109,28 +1244,7 @@ def _solve_bundle_with_custom_regions(
     beta_c = np.ascontiguousarray(beta)
 
     def _on_fwd_step(it: int, res: float, total: np.ndarray, term: np.ndarray) -> None:
-        if streamer is not None and (it == 1 or it % 2 == 0):
-            d_tot = np.clip(
-                K.paired_density(np.ascontiguousarray(total), beta_c, colsign, Ns, nc).reshape(Nt, nb).sum(1),
-                0.0,
-                None,
-            )
-            d_wave = np.clip(
-                K.paired_density(np.ascontiguousarray(term), beta_c, colsign, Ns, nc).reshape(Nt, nb).sum(1),
-                0.0,
-                None,
-            )
-            t_max = float(d_tot.max())
-            w_max = float(d_wave.max())
-            if t_max > 1e-20 and w_max > 1e-20:
-                d_vis = (0.70 * (d_tot / t_max) + 0.30 * (d_wave / w_max)) * t_max
-            else:
-                d_vis = d_tot
-            streamer.emit_transient_values(d_vis, phase=2, step=it, residual=res, force=True)
-            frac = float(np.clip(np.log10(max(res, 1e-12)) / log_tol, 0.0, 1.0)) if log_tol < 0 else 0.5
-            _emit_progress(100 + int(round(frac * 95)), 200)
-            if getattr(streamer, "pace_sec", 0.0) > 0.0:
-                time.sleep(streamer.pace_sec)
+        _stream_forward(streamer, chain, it, res, total, term, beta_c, colsign, log_tol)
 
     # When live streaming is active, run the forward pass unaccelerated (accel=False)
     # so the Markov chain steps smoothly t=1,2,3,... and animates the bundle growth.
@@ -1207,6 +1321,7 @@ def cmd_solve_bundle(req_path: str) -> None:
     from .afq import seal_26 as apply_seal_26
     from .branches import extract_branch_arbor, extract_flux_streamlines, write_trx
     from .quantify import quantify_bundle
+    from .solve import segment_bundles
 
     t_start = time.perf_counter()
     with open(req_path, "r") as fh:
@@ -1277,24 +1392,25 @@ def cmd_solve_bundle(req_path: str) -> None:
         if m.any():
             no_end_mask = m
 
-    # Optional midline exclusion rule
-    midline_raw = req.get("midline_exclusion", "auto")
-    if isinstance(midline_raw, bool):
-        midline_mode = "auto" if midline_raw else "none"
-    else:
-        midline_mode = str(midline_raw).lower()
-    if midline_mode == "true":
-        midline_mode = "auto"
-    elif midline_mode == "false":
-        midline_mode = "none"
+    # Optional midline exclusion: keep a one-sided bundle in its hemisphere. True picks the side
+    # the way mpat.run does (the name, "Left ..." / "..._L", else the ROI centres); "left" /
+    # "right" force it.
+    midline_raw = req.get("midline_exclusion", False)
+    midline_mode = str(midline_raw).strip().lower() if midline_raw not in (None, False, True) else midline_raw
+    if midline_mode in ("true", "on", "auto"):
+        midline_mode = True
+    elif midline_mode in ("false", "off", "none", ""):
+        midline_mode = False
     midline_tol_mm = float(req.get("midline_tol_mm", 0.0))
     bundle_name = str(req.get("bundle_name") or "Bundle")
-    if midline_mode in ("left", "right") or (
-        midline_mode == "auto"
-        and any(tok in bundle_name.lower() for tok in ("left", "right", "_l", "_r"))
-    ):
+    if midline_mode:
+        from .afq import _is_left
+
         xyz_x = nib.affines.apply_affine(affine, np.indices(shape).reshape(3, -1).T)[:, 0].reshape(shape)
-        is_left = midline_mode == "left" or bundle_name.lower().startswith("left") or bundle_name.lower().endswith("_l") or "left" in bundle_name.lower()
+        if midline_mode in ("left", "right"):
+            is_left = midline_mode == "left"
+        else:
+            is_left = _is_left(bundle_name, {"include": include_masks, "start": start_mask, "end": end_mask}, xyz_x)
         mid_exc = (xyz_x > midline_tol_mm) if is_left else (xyz_x < -midline_tol_mm)
         exclude_mask = mid_exc if exclude_mask is None else (exclude_mask | mid_exc)
 
@@ -1310,8 +1426,6 @@ def cmd_solve_bundle(req_path: str) -> None:
     tol = float(req.get("solver_tol") or req.get("tol") or 1e-6)
     accel_str = str(req.get("solver_accel") or req.get("accel") or "mr").lower()
     accel: Any = False if accel_str in ("none", "false", "") else accel_str
-    use_cascade = bool(req.get("use_cascade", True))
-
     explicit_stream = bool(req.get("stream_mmap_path"))
     stream_mmap_path = req.get("stream_mmap_path") or str(out_dir / "live_density.mmap")
     streamer: Optional[LiveDensityStreamer] = None
@@ -1321,17 +1435,38 @@ def cmd_solve_bundle(req_path: str) -> None:
     except Exception:
         streamer = None
 
-    res = _solve_bundle_with_custom_regions(
-        chain,
-        active_launches,
-        spec,
-        term_mask=term_mask,
-        no_end_mask=no_end_mask,
-        tol=tol,
-        accel=accel,
-        use_cascade=use_cascade,
-        streamer=streamer,
-    )
+    if term_mask is not None or no_end_mask is not None or _ends_outside_absorbers(chain, spec):
+        res = _solve_bundle_with_custom_regions(
+            chain,
+            active_launches,
+            spec,
+            term_mask=term_mask,
+            no_end_mask=no_end_mask,
+            tol=tol,
+            accel=accel,
+            streamer=streamer,
+        )
+    else:
+        # The same solver mpat run uses. Live streaming runs it unaccelerated so the frames
+        # advance one step at a time.
+        log_tol = float(np.log10(max(tol, 1e-12)))
+
+        def on_step(st) -> None:
+            if st.phase == "backward":
+                _stream_backward(streamer, chain, st.it, st.res, st.total, st.term, st.colsign, st.n_kinds, log_tol)
+            else:
+                _stream_forward(streamer, chain, st.it, st.res, st.total, st.term, st.beta, st.colsign, log_tol)
+
+        pacing = streamer is not None and streamer.pace_sec > 0.0
+        res = segment_bundles(
+            chain,
+            [spec],
+            active_launches,
+            tol=tol,
+            accel=False if pacing else accel,
+            on_step=on_step if streamer is not None else None,
+        )[bundle_name]
+        res.interior_endpoints_t = None
 
     _emit_progress(3, 5)
     qb = quantify_bundle(
@@ -1507,7 +1642,6 @@ def cmd_precompute_cli(argv: List[str]) -> int:
     target_dir = Path(a.out_dir).resolve() if a.out_dir else (inp if inp.is_dir() else inp.parent)
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    is_ptt = a.preset == "ptt"
     with tempfile.TemporaryDirectory(prefix="mpat_precompute_") as tmp:
         req = {
             "out_dir": tmp,
@@ -1517,15 +1651,20 @@ def cmd_precompute_cli(argv: List[str]) -> int:
             "preset": a.preset,
             "angle_deg": a.angle_deg,
             "step_vox": a.step_vox,
-            "double_odf": not a.single_odf and (not is_ptt),
-            "fod_thresh": a.fod_thresh if a.fod_thresh is not None else (0.08 if is_ptt else 0.05),
-            "fod_power": a.fod_power if a.fod_power is not None else (2.0 if is_ptt else 1.0),
-            "stop_mass_tau": a.stop_mass_tau if a.stop_mass_tau is not None else (0.25 if is_ptt else 0.0),
-            "curv_sigma_deg": a.curv_sigma_deg if a.curv_sigma_deg is not None else (22.5 if is_ptt else 0.0),
-            "probe_radius_vox": a.probe_radius_vox if a.probe_radius_vox is not None else (0.35 if is_ptt else 0.0),
+            "double_odf": not a.single_odf,
             "max_length_mm": a.max_length_mm,
             "wm_threshold": a.wm_threshold,
         }
+        # Unset options take the preset's defaults (those of mpat.run) in _requested_config.
+        for key, value in (
+            ("fod_thresh", a.fod_thresh),
+            ("fod_power", a.fod_power),
+            ("stop_mass_tau", a.stop_mass_tau),
+            ("curv_sigma_deg", a.curv_sigma_deg),
+            ("probe_radius_vox", a.probe_radius_vox),
+        ):
+            if value is not None:
+                req[key] = value
         req_file = Path(tmp) / "req.json"
         req_file.write_text(json.dumps(req, indent=2))
         cmd_build_transitions(str(req_file))
