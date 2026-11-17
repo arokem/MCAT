@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import zipfile
-from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
 
@@ -231,6 +230,7 @@ def save_transitions_odx(
     surv: Optional[np.ndarray] = None,
     mittens_maps: Optional[Dict[str, np.ndarray]] = None,
     quantize_weights: bool = True,
+    max_length_mm: Optional[float] = None,
 ) -> Path:
     """Persist ``chain`` (including PTT / 26-class stencil, fixel lobes, and per-voxel transition
     metrics) as a spec-compliant ``.odx`` archive (or ``.odxd`` directory).
@@ -261,6 +261,9 @@ def save_transitions_odx(
     quantize_weights : bool
         Store ``Q_w`` and ``R_val`` in ``float32`` instead of ``float64`` (halves file size while
         preserving transition probabilities to ``< 1e-7``).
+    max_length_mm : float, optional
+        The soft maximum length the chain's overlength states were computed for; recorded in
+        the header so readers can check it.
     """
     path = Path(path)
     shape = tuple(int(s) for s in chain.shape)
@@ -438,6 +441,7 @@ def save_transitions_odx(
         "mpat": {
             "format_version": 1,
             "fingerprint": fingerprint or "",
+            "max_length_mm": float(max_length_mm) if max_length_mm else None,
             "config": chain.cfg.key(),
             "zooms": zooms,
             "pshape": list(chain.pshape),

@@ -72,13 +72,7 @@ def afd_tract_metrics(bundle_res, whole_density_class, sh_rows, geo, lobes: Lobe
         lobes = segment_lobes(sh_rows, geo)
     n_b, u_b = fixel_streamlines(bundle_res.density_class, sh_rows, geo, lobes)
     n_w, u_w = fixel_streamlines(whole_density_class, sh_rows, geo, lobes)
-    # Regularize denominator so boundary voxels with tiny whole-brain visitation n_w
-    # do not amplify negligible bundle tails (n_b / (n_w + reg)).
-    pos_b = n_b[n_b > 0]
-    b_scale = float(np.percentile(pos_b, 95)) if pos_b.size else 1.0
-    pos_w = n_w[n_w > 0]
-    w_reg = max(0.10 * float(np.median(pos_w)) if pos_w.size else 1e-6, 0.05 * b_scale, 1e-12)
-    share = np.divide(n_b, np.maximum(n_w, 0.0) + w_reg, out=np.zeros_like(n_b), where=(n_b > 0))
+    share = np.divide(n_b, n_w, out=np.zeros_like(n_b), where=n_w > 1e-30)
     share = np.clip(share, 0.0, 1.0)
     fixel_afd = share * lobes.integral
     Nt = len(sh_rows)

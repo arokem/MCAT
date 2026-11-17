@@ -409,6 +409,19 @@ class BundleResult:
     end_mask: np.ndarray = None      # optional end ROI mask on the chain grid
 
 
+@dataclass
+class SolveStep:
+    """What a :func:`segment_bundles` ``on_step`` callback gets after each series iteration."""
+    phase: str               # "backward" (completion probabilities) or "forward" (occupancy)
+    it: int                  # iteration number within the phase
+    res: float               # relative residual
+    total: np.ndarray        # solution so far, (n_states * ncomp, columns)
+    term: np.ndarray         # this iteration's term of the series: the current wavefront
+    colsign: np.ndarray      # inclusion-exclusion sign of each column
+    n_kinds: int             # end kinds of the first bundle (its columns 0 .. n_kinds - 1 avoid nothing)
+    beta: np.ndarray = None  # the backward solution; forward phase only
+
+
 def _endpoint_kinds(a_valid, a_start, a_end):
     """Disjoint end categories per half and the non-negative bilinear form M >= 0:
     P(both ends acceptable) = sum_kl M[k, l] V_k(h1) V_l(h2)."""
@@ -493,8 +506,17 @@ def _solve(chain, x0, mask, tol, max_iter, what, verbose=False, accel=False, on_
 
 
 def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, verbose=False, clock=None,
-                 keep_fields=False, accel=False, arc_length=False, zooms=None):
+                 keep_fields=False, accel=False, arc_length=False, zooms=None, on_step=None):
     t0 = time.time()
+    colsign_all = np.concatenate([p.signs[p.xcol] for p in plans])
+    n_kinds = plans[0].nK
+
+    def step_hook(phase, beta=None):
+        if on_step is None:
+            return None
+        return lambda it, res, total, term: on_step(SolveStep(phase, it, res, total, term, colsign_all,
+                                                               n_kinds, beta))
+
     gclock = Clock()
     nb, Ns, nc = chain.nb, chain.n_states, chain.ncomp
     offs = np.cumsum([0] + [p.C for p in plans])
@@ -508,7 +530,8 @@ def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, ver
         r = np.concatenate([chain.absorb_rhs(p.absw) for p in plans], axis=1)
         r *= mask
     with gclock("backward solve"):
-        beta, info_b = _solve(chain, r, mask, tol, max_iter, "backward", verbose, accel=accel)
+        beta, info_b = _solve(chain, r, mask, tol, max_iter, "backward", verbose, accel=accel,
+                              on_step=step_hook("backward"))
     with gclock("trapped maps"):
         _trapped(chain, info_b, "backward", names, on_trapped)
     del r
@@ -537,7 +560,8 @@ def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, ver
     gclock.add("seed weights (forward start)", time.perf_counter() - t_init)
     launch = pi0.copy() if keep_fields else None   # solve_series consumes pi0
     with gclock("forward solve"):
-        S, info_f = _solve(chain, pi0, mask, tol, max_iter, "forward", verbose, accel=accel)
+        S, info_f = _solve(chain, pi0, mask, tol, max_iter, "forward", verbose, accel=accel,
+                           on_step=step_hook("forward", beta))
     with gclock("trapped maps"):
         _trapped(chain, info_f, "forward", names, on_trapped)
     del pi0, mask
@@ -605,7 +629,7 @@ def _solve_group(chain, plans, L, tol, max_iter, on_result, on_trapped=None, ver
 
 def segment_bundles(chain, specs, launches, tol=1e-6, max_mem=8e9, max_iter=5000,
                     valid_classes=VALID_ENDS, on_result=None, on_trapped=None, verbose=False,
-                    clock=None, keep_fields=False, accel=False, arc_length=False, zooms=None):
+                    clock=None, keep_fields=False, accel=False, arc_length=False, zooms=None, on_step=None):
     """Segment bundles, sharing solves.  ``specs``: dicts with ``name`` and optional
     ``include`` (list of masks), ``exclude``, ``start``, ``end`` (boolean volumes on the chain
     grid).  Bundles are packed in order into groups whose columns fit in ``max_mem`` bytes;
@@ -621,6 +645,8 @@ def segment_bundles(chain, specs, launches, tol=1e-6, max_mem=8e9, max_iter=5000
     ``accel``: False (default), True / "mr" (Periodic Minimal Residual), or "aitken".
     ``arc_length``: weight class visits by physical intra-voxel chord lengths (in mm if ``zooms``
     is provided, else in voxels).
+    ``on_step(step)``: called with a :class:`SolveStep` after every backward and forward
+    iteration (e.g. to stream the solve as it converges).
     Returns {name: BundleResult}."""
     if keep_fields and chain.ncomp != 1:
         raise ValueError("keep_fields needs the plain chain (ncomp == 1), not the moment chain")
@@ -646,14 +672,14 @@ def segment_bundles(chain, specs, launches, tol=1e-6, max_mem=8e9, max_iter=5000
         if group and used + p.C > cap:
             out.update(_solve_group(chain, group, launches, tol, max_iter, on_result, on_trapped,
                                     verbose, clock, keep_fields, accel=accel, arc_length=arc_length,
-                                    zooms=zooms))
+                                    zooms=zooms, on_step=on_step))
             group, used = [], 0
         group.append(p)
         used += p.C
     if group:
         out.update(_solve_group(chain, group, launches, tol, max_iter, on_result, on_trapped,
                                 verbose, clock, keep_fields, accel=accel, arc_length=arc_length,
-                                zooms=zooms))
+                                zooms=zooms, on_step=on_step))
     if own:
         clock.report("bundle segmentation time", time.perf_counter() - t_all)
     return out

@@ -785,6 +785,7 @@ def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angl
                     launches=launches,
                     whole_dc=whole.density_class,
                     surv=surv_state,
+                    max_length_mm=max_length,
                 )
                 log.info("transitions ODX written to %s", odx_out)
             if st_mode in ("nifti", "both"):
