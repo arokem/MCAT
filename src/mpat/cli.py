@@ -9,7 +9,7 @@ def main(argv=None):
     p.add_argument("dwi"), p.add_argument("bval"), p.add_argument("bvec")
     p.add_argument("t1", help="T1w image, registered to the DWI (pyAFQ's t1_file)")
     p.add_argument("output_dir")
-    p.add_argument("--n-proc", type=int, help="threads (required unless --rois-only)")
+    p.add_argument("--n-proc", type=int, help="threads (required unless --rois-only / --viz-only)")
     p.add_argument("--max-mem", default="auto",
                    help="memory budget, e.g. 16GB, or auto (default): min(80%%, limit - 10 GB) of the job's "
                         "memory limit (cgroup / SLURM / physical), less what is already in use")
@@ -51,6 +51,13 @@ def main(argv=None):
     p.add_argument("--rois-only", action="store_true",
                    help="solve nothing: write a finished run's ROI masks (start / end / include / exclude) "
                         "and a viewer page showing them, <stem>_desc-mpat_rois.html")
+    p.add_argument("--viz-only", action="store_true",
+                   help="solve nothing: rewrite a finished run's collage and viewer pages from its outputs "
+                        "(e.g. after updating mpat); give the same arguments as the run.  The collage and the all-bundles "
+                        "page always show every bundle; --bundles limits which per-bundle pages are redone")
+    p.add_argument("--colormap", metavar="NAME",
+                   help="NiiVue colour map of the density on every viewer page (default turbo), "
+                        "e.g. jet, hot, cubehelix; 'bundle': one hue per bundle")
     p.add_argument("--viz-rois", action="store_true",
                    help="viewer pages also show each bundle's include (green) / exclude (red) ROIs")
     p.add_argument("--flux", action="store_true", help="also write edge-flux maps per bundle (mpat.fields)")
@@ -66,7 +73,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     from AFQ.api.participant import ParticipantAFQ
 
-    from .afq import run, write_rois
+    from .afq import run, write_rois, write_viz
 
     kwargs = afq_kwargs(a.afq_kwargs)
     if "bundle_info" not in kwargs:              # MPAT's bundles: pyAFQ's defaults + the HCC + the fornix
@@ -89,13 +96,17 @@ def main(argv=None):
                           fornix=not a.no_fornix_exclude)
         logging.getLogger("mpat").info("ROI page: %s", page)
         return
+    if a.viz_only:
+        out = write_viz(afq, a.bundles, a.moments, out_dir=a.out_dir, rois=a.viz_rois, colormap=a.colormap)
+        logging.getLogger("mpat").info("figures rewritten in %s", out)
+        return
     if a.n_proc is None:
-        p.error("--n-proc is required (except with --rois-only)")
+        p.error("--n-proc is required (except with --rois-only or --viz-only)")
     run(afq, a.n_proc, a.max_mem, a.bundles, a.moments, a.tol, a.angle, not a.single_odf, viz=not a.no_viz,
         synthseg_thalamus=not a.mni_thalamus,
         max_length=a.max_length, viz_rois=a.viz_rois, no_midline=a.no_midline,
         midline_tol=a.midline_tol, out_dir=a.out_dir, verbose=a.verbose,
-        fornix=not a.no_fornix_exclude, flux=a.flux, fixels=a.fixels)
+        fornix=not a.no_fornix_exclude, flux=a.flux, fixels=a.fixels, viz_colormap=a.colormap)
     if a.pyafq:   # pyAFQ's recognition: MPAT's rules removed, MPAT-only bundles (fornix) dropped
         from .bundles import pyafq_bd
 

@@ -10,8 +10,10 @@ or as a web page to open in any browser or share: ``mpat.viewer.save_html("bundl
 folder, ...)`` with the same options.
 
 Each bundle's density is shown on a log scale, from ``floor`` x its peak (faint) to its peak
-(bright), with its own colour map; its core (written by ``mpat.run``, computed here if
-missing) is drawn as a tube in the matching colour.  ``glyphs=True`` adds the bundles'
+(bright), in one colour map for all (``turbo`` by default), its opacity falling off with
+the density -- in the 3-D view too, where NiiVue ray-marches the density volumes; its core
+(written by ``mpat.run``, computed here if missing) is drawn as a tube in its own colour,
+which tells the bundles apart.  ``glyphs=True`` adds the bundles'
 visitation ODFs -- the directions their walkers travel in each voxel, drawn like fODF
 glyphs -- on three planes through each core's midpoint.  Slices and 3-D render are both
 live: click to move the slices, drag in the render to rotate, scroll to zoom.
@@ -95,7 +97,7 @@ def log_density_u8(density, floor=1e-3):
 
 def scene(folder, bundles=None, t1=None, floor=1e-3, show_density=True, density_opacity=1.0, crop=True,
           core_radius=1.2, glyphs=False, glyph_planes=None, glyph_floor=1e-2, glyph_range=GLYPH_RANGE,
-          glyph_color=None, isosurface=True,
+          glyph_color=None, colormap=None, falloff=2,
           glyph_norm=True, max_glyphs=4000, fodf=None, write_missing_cores=True, rois=False,
           roi_opacity=1.0):
     """What ``view`` and ``save_html`` draw, as data: volumes and meshes (file bytes plus
@@ -107,7 +109,21 @@ def scene(folder, bundles=None, t1=None, floor=1e-3, show_density=True, density_
     t1               background image (default: the run's ``*_desc-mpat_dseg``)
     floor            faintest density shown, as a fraction of each bundle's peak
     show_density     overlay the density maps (False: cores only, on the background)
-    density_opacity  of the density over the background (1: opaque; below ``floor`` the
+    colormap         NiiVue colour map of every density ("turbo", default: a smoother jet with
+                     many distinguishable levels; "jet", "hot", ...).  With several bundles, their
+                     densities are one volume: per voxel, the largest of them (each on its own
+                     log scale), which NiiVue draws as one layer, not one per bundle (much
+                     faster); so are their ROIs.  "bundle": a volume per bundle instead, each in a
+                     single-hue map in its core's colour
+    falloff          how the density's opacity drops off: 0 at ``floor``, 1 at the peak, raised to
+                     this power (1 linear in log density, 2 default, higher fades more), so the
+                     ray-marched 3-D render is translucent where the density is low (in the slices
+                     too).  NiiVue draws every overlay voxel above its threshold fully opaque
+                     whatever the colour map's alpha; this sets its alpha from the density itself
+                     instead (NiiVue's alpha modulation).  0: opaque, as NiiVue draws it, with
+                     ``density_opacity``
+    density_opacity  of the density over the background (falloff=0 only: NiiVue ignores a
+                     modulated volume's opacity) (1: opaque; below ``floor`` the
                      background shows)
     crop             crop every volume to the content box (the background's non-empty voxels
                      and every bundle above ``floor``, plus 2 voxels), so views fill their space
@@ -126,15 +142,13 @@ def scene(folder, bundles=None, t1=None, floor=1e-3, show_density=True, density_
                      size proportional to the visits, the bundle's largest filling its voxel).
                      Glyphs read best zoomed in on a slice, with show_density=False.
     max_glyphs       per bundle with glyph_planes="all"; the densest voxels are kept
-    isosurface       draw each bundle's density as an opaque surface at ``floor`` x its peak, in
-                     its colour; the 3-D view's only picture of the density (the standalone page
-                     redraws it at its slider's level)
     fodf             an SH image on the same grid (e.g. pyAFQ's ``*_model-csd_param-wm_dwimap``):
                      grey glyphs at the same voxels, a little smaller, for comparison
     write_missing_cores  compute cores that are not on disk yet and save them next to the maps
-    rois             show each bundle's include ROIs (green) and exclude ROIs (red) as surfaces,
-                     from the ``_desc-include_mask`` / ``_desc-exclude_mask`` files mpat.run writes
-    roi_opacity      of those surfaces (1: opaque)
+    rois             show each bundle's include ROIs (green) and exclude ROIs (red) as overlay
+                     volumes (ray-marched in 3-D), from the ``_desc-include_mask`` /
+                     ``_desc-exclude_mask`` files mpat.run writes
+    roi_opacity      of those overlays (1: opaque)
     """
     import json
 
@@ -150,7 +164,7 @@ def scene(folder, bundles=None, t1=None, floor=1e-3, show_density=True, density_
         cand = sorted(glob.glob(op.join(folder, "**", "*_dseg.nii.gz"), recursive=True),
                       key=lambda x: "_desc-mpat_dseg" not in x)
         t1 = cand[0] if cand else None
-    S = dict(volumes=[], meshes=[], glyphs=[], bundles=[], focus=None, slab=None, isosurface=bool(isosurface),
+    S = dict(volumes=[], meshes=[], glyphs=[], bundles=[], focus=None, slab=None, falloff=int(falloff),
              subject=op.basename(next(iter(files.values()))["prefix"]).split("_bundle-")[0])
     dens = {name: nib.load(f["density"]) for name, f in files.items()}
     dens = {name: (img, np.asarray(img.dataobj, np.float32)) for name, img in dens.items()}
@@ -188,10 +202,14 @@ def scene(folder, bundles=None, t1=None, floor=1e-3, show_density=True, density_
         glyph_color = "direction" if len(names) == 1 else "bundle"
     S["glyph_color"] = glyph_color
     every = []
+    merge = len(files) > 1 and colormap != "bundle"     # one density volume: the max over bundles
+    merged = dict(density=None, include=None, exclude=None)
+    enc = min(floor, DENSITY_RANGE)   # encoded down to DENSITY_RANGE; cal_min shows it from `floor`
     for i, (name, f) in enumerate(files.items()):
         img, dfull = dens[name]
         d = dfull[cut]                        # cropped; on the grid A
         cmap, rgb = PALETTE[i % len(PALETTE)]
+        cmap = cmap if colormap == "bundle" else (colormap or "turbo")
         meta = dict(name=name, label=name, rgb=list(rgb), colormap=cmap)
         if op.exists(f["prefix"] + "_desc-summary.json"):
             with open(f["prefix"] + "_desc-summary.json") as fh:
@@ -199,25 +217,25 @@ def scene(folder, bundles=None, t1=None, floor=1e-3, show_density=True, density_
             meta.update(label=info.get("bundle", name),
                         expected_streamlines=info.get("result", {}).get("expected_bundle_streamlines"))
         S["bundles"].append(meta)
-        if show_density or not S["volumes"]:
-            # encoded down to DENSITY_RANGE; cal_min shows it from `floor`, so a viewer can move it
-            enc = min(floor, DENSITY_RANGE)
+        if merge:
+            u8 = log_density_u8(d, enc)
+            merged["density"] = u8 if merged["density"] is None else np.maximum(merged["density"], u8)
+        elif show_density or not S["volumes"]:
             S["volumes"].append(dict(role="density", bundle=name, name=f"{name}_logdensity.nii.gz",
                                      data=_nifti_bytes(log_density_u8(d, enc), A), colormap=cmap,
                                      cal_min=_u8_level(floor, enc), cal_max=255, floor=floor, enc_floor=enc,
                                      opacity=density_opacity if (S["volumes"] or not show_density) else 1.0))
-        if isosurface and d.max() > 0:
-            S["meshes"].append(dict(role="surface", bundle=name, name=f"{name}_surface.mz3", rgba255=[*rgb, 255],
-                                    opacity=1.0, data=isosurface_mz3(d / d.max(), floor, A, rgb)))
-        if rois:
-            for role, rgb_roi in (("include", ROI_COLORS["include"]), ("exclude", ROI_COLORS["exclude"])):
+        if rois:   # binary masks: 0 below cal_min (transparent), 1 in the ROI's colour map
+            for role, cmap_roi in ROI_COLORMAPS.items():
                 if f.get(role) is None:
                     continue
                 m = np.asarray(nib.load(f[role]).dataobj)[cut] > 0
-                if m.any():
-                    S["meshes"].append(dict(role=role, bundle=name, name=f"{name}_{role}.mz3",
-                                            rgba255=[*rgb_roi, 255], opacity=roi_opacity,
-                                            data=isosurface_mz3(m.astype(np.float32), 0.5, A, rgb_roi)))
+                if merge:
+                    merged[role] = m if merged[role] is None else merged[role] | m
+                elif m.any():
+                    S["volumes"].append(dict(role=role, bundle=name, name=f"{name}_{role}.nii.gz",
+                                             data=_nifti_bytes(m, A), colormap=cmap_roi, opacity=roi_opacity,
+                                             cal_min=0.5, cal_max=1.0))
             if not (f.get("include") or f.get("exclude")):
                 log.warning("%s: no include / exclude masks on disk (written by mpat.run since 2026-11-06)", name)
         # core: written by mpat.run; computed here if missing
@@ -265,6 +283,17 @@ def scene(folder, bundles=None, t1=None, floor=1e-3, show_density=True, density_
                                 rel=(d[tuple(ijk.T)] / d.max()).astype(np.float32),
                                 rgb=None if glyph_color == "direction" else list(rgb)))
         S["glyph_floor"], S["glyph_range"] = glyph_floor, keep
+    if merge:   # after the background: the density, then the ROIs of every bundle
+        if merged["density"] is not None and (show_density or back is None):
+            S["volumes"].append(dict(role="density", bundle="all", name="all_logdensity.nii.gz",
+                                     data=_nifti_bytes(merged["density"], A), colormap=cmap,
+                                     cal_min=_u8_level(floor, enc), cal_max=255, floor=floor, enc_floor=enc,
+                                     opacity=density_opacity if back is not None else 1.0))
+        for role, cmap_roi in ROI_COLORMAPS.items():
+            if merged[role] is not None and merged[role].any():
+                S["volumes"].append(dict(role=role, bundle="all", name=f"all_{role}.nii.gz",
+                                         data=_nifti_bytes(merged[role], A), colormap=cmap_roi,
+                                         opacity=roi_opacity, cal_min=0.5, cal_max=1.0))
     if fodf is not None and every:
         fimg = nib.load(fodf)
         if fimg.shape[:3] != ref.shape[:3] or not np.allclose(fimg.affine, ref.affine, atol=1e-3):
@@ -295,8 +324,9 @@ def scene(folder, bundles=None, t1=None, floor=1e-3, show_density=True, density_
 
 def view(folder, height=640, **kwargs):
     """ipyniivue ``NiiVue`` widget with the MPAT bundles under ``folder``: the three slices
-    and a 3-D render in an equal 2 x 2 grid, cropped to the content and opaque throughout
-    (the 3-D view: each bundle as a surface in a lit head cut open towards the camera).
+    and a 3-D render in an equal 2 x 2 grid, cropped to the content (the 3-D view: each
+    bundle's density ray-marched by NiiVue's volume renderer, from ``floor`` x its peak, in a
+    lit head cut open towards the camera).
     Double-click a view to enlarge it to the whole widget; double-click again for the grid.  ``kwargs``: ``scene``'s options (bundles, t1, floor, glyphs, fodf, ...),
     then any ``ipyniivue.NiiVue`` option (e.g. back_color=(1, 1, 1, 1))."""
     import asyncio
@@ -308,13 +338,12 @@ def view(folder, height=640, **kwargs):
     S = scene(folder, **{k: v for k, v in kwargs.items() if k in own})
     nv_options = {k: v for k, v in kwargs.items() if k not in own}
     # the three slices and the 3-D render as an equal 2 x 2 grid, using all their space.
-    # Nothing transparent: meshes are not seen through the volume (x-ray 0), and the 3-D view
-    # leaves the density out (the bundles are opaque surfaces there) and cuts the head open,
-    # lit, on the side facing the camera
+    # Meshes are not seen through the volume (x-ray 0); the 3-D view cuts the head open, lit,
+    # on the side facing the camera, and ray-marches the density (and ROI) overlays into it
     opts = dict(back_color=(0, 0, 0, 1), slice_type=SliceType.MULTIPLANAR,
                 multiplanar_show_render=ShowRender.ALWAYS, multiplanar_layout=MultiplanarType.GRID,
                 multiplanar_equal_size=True, hero_image_fraction=0.0, is_colorbar=False, mesh_xray=0.0,
-                render_overlay_blend=0.0, clip_plane_color=(0.0, 0.0, 0.0, 0.0), tile_margin=0.0,
+                render_overlay_blend=1.0, clip_plane_color=(0.0, 0.0, 0.0, 0.0), tile_margin=0.0,
                 multiplanar_pad_pixels=0, is_orient_cube=False, mesh_thickness_on_2d=S["slab"] or 4.0)
     opts.update(nv_options)
     nv = NiiVue(height=height, **opts)
@@ -387,11 +416,28 @@ def view(folder, height=640, **kwargs):
         nv.scene.crosshair_pos = S["focus_frac"]
     nv.set_clip_planes([[0.0, nv.scene.render_azimuth + 180, -nv.scene.render_elevation]])
     nv.on_canvas_attached(lambda *_: nv.set_volume_render_illumination(0.6))   # lit, solid-looking head
+    # opacity from the density itself (alpha modulation by its own image; see scene's falloff).
+    # ipyniivue applies modulation only on a change, once the page holds the volume, and
+    # loads the volumes in order: set it when the last is in, from a cleared state
+    dens_idx = [i for i, v in enumerate(S["volumes"]) if v["role"] == "density"]
+    seen = set()
+
+    def loaded(*args):
+        seen.add(len(seen))
+        if len(seen) < len(S["volumes"]) or not S["falloff"]:
+            return
+        seen.clear()
+        for i in dens_idx:
+            vol = nv.volumes[i]
+            vol.modulate_alpha, vol.modulation_image = 0, None
+            vol.modulate_alpha, vol.modulation_image = S["falloff"], i
+
+    nv.on_image_loaded(loaded)
     nv.bundle_names = [b["name"] for b in S["bundles"]]   # overlay order after the background
     return nv
 
 
-ROI_COLORS = {"include": (70, 200, 110), "exclude": (225, 60, 60)}
+ROI_COLORMAPS = {"include": "green", "exclude": "red"}   # NiiVue colour maps of the ROI overlays
 NIIVUE_CDN = "https://cdn.jsdelivr.net/npm/@niivue/niivue@0.65.0/dist/niivue.umd.js"
 
 
@@ -410,7 +456,6 @@ def save_html(path, folder, title=None, niivue_js=None, **kwargs):
     from .geometry import _sh_basis
 
     S = scene(folder, **kwargs)
-    S["meshes"] = [m for m in S["meshes"] if m["role"] != "surface"]   # the page draws them live
     b64 = lambda a, t: base64.b64encode(np.ascontiguousarray(a, t).tobytes()).decode()  # noqa: E731
     for item in S["volumes"] + S["meshes"]:
         item["data"] = base64.b64encode(item["data"]).decode()
@@ -505,17 +550,6 @@ def _mz3(tri, verts, rgba):
     body = (np.asarray(tri).astype("<u4").tobytes() + np.asarray(verts).astype("<f4").tobytes()
             + np.asarray(rgba, np.uint8).tobytes())
     return gzip.compress(head + body, compresslevel=6)
-
-
-def isosurface_mz3(values, level, affine, rgb):
-    """Gzipped MZ3 of the surface where ``values`` crosses ``level`` (marching cubes, closed
-    at the volume's edges), in world mm, one colour."""
-    from skimage.measure import marching_cubes
-
-    v = np.pad(np.asarray(values, np.float32), 1)
-    verts, faces, _, _ = marching_cubes(v, level=level)
-    verts = nib.affines.apply_affine(affine, verts - 1.0)
-    return _mz3(faces, verts, np.tile([*rgb, 255], (len(verts), 1)))
 
 
 def tube_obj(xyz, radius=1.0, sides=12):
