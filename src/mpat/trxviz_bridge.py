@@ -38,11 +38,6 @@ import nibabel as nib
 import numpy as np
 from scipy import ndimage as ndi
 
-# Ensure sibling odx-rs/python is on sys.path if odx is not installed in the env
-_cand_odx = Path(__file__).resolve().parents[3] / "odx" / "odx-rs" / "python"
-if _cand_odx.is_dir() and str(_cand_odx) not in sys.path:
-    sys.path.insert(0, str(_cand_odx))
-
 
 def _emit_progress(done: int, total: int) -> None:
     print(f"PROGRESS {int(done)} {int(total)}", flush=True)

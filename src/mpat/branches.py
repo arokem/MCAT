@@ -1160,16 +1160,7 @@ def render_trxviz(
     import os
     import shutil
     import subprocess
-    from pathlib import Path
-
-    # A TRXViz checkout next to this repo (../odx/TRXViz) is the last resort.
-    sibling = Path(__file__).resolve().parents[3] / "odx" / "TRXViz" / "target" / "release" / "trxviz-cli"
-    cli = (
-        trxviz_cli_bin
-        or os.environ.get("TRXVIZ_CLI")
-        or shutil.which("trxviz-cli")
-        or (str(sibling) if sibling.is_file() else "trxviz-cli")
-    )
+    cli = trxviz_cli_bin or os.environ.get("TRXVIZ_CLI") or shutil.which("trxviz-cli") or "trxviz-cli"
     cmd = [
         cli,
         "render",
