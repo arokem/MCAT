@@ -490,7 +490,7 @@ def visualize(out, stem, bundles, fodf=None, t1=None, rois=False, colormap=None,
     """The run's figures: a MIP collage of the bundles, a viewer page with all of them
     (densities and cores), and a page per bundle with its glyphs (and the fODF, if given);
     ``rois``: the pages also show each bundle's include / exclude ROIs.  ``colormap``: NiiVue
-    colour map of the density on every page (default turbo; e.g. "jet", "hot"; "bundle": one
+    colour map of the density on every page (default actc; e.g. "turbo", "hot"; "bundle": one
     hue per bundle).  ``all_bundles``: the
     bundles of the collage and the all-bundles page (default ``bundles``); per-bundle pages are
     written for ``bundles``.
@@ -669,7 +669,7 @@ def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angl
                 and the fODF (mpat.viewer.save_html).  Pages load NiiVue from a CDN.
     viz_rois    the viewer pages also show each bundle's include / exclude ROIs
     viz_colormap  NiiVue colour map of the density on the per-bundle viewer pages (default
-                turbo; e.g. "jet", "hot"), the all-bundles page included ("bundle": one hue per bundle)
+                actc; e.g. "turbo", "hot"), the all-bundles page included ("bundle": one hue per bundle)
     no_midline  bundle names whose cross_midline=False is ignored (no other-hemisphere exclusion)
     midline_tol mm past the midline the corticospinal tracts may go before the other hemisphere
                 is excluded (default: their rule, 10; 0: a strict cut); every other one-sided bundle
