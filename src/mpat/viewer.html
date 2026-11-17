@@ -96,12 +96,13 @@
     <section id="thr-sec" hidden>
       <h2>Thresholds</h2>
       <label class="slider" id="dfloor-row">Density shown from <output id="dfloor-out"></output><input type="range" id="dfloor" step="0.1" max="0"></label>
-      <label class="chip" id="iso-row"><input type="checkbox" id="iso">Opaque surface at this level</label>
       <label class="slider" id="gfloor-row" hidden>Glyphs from <output id="gfloor-out"></output><input type="range" id="gfloor" step="0.1" max="0"></label>
       <p class="note">Fractions of each bundle's peak density (expected visits), log scale.</p>
     </section>
     <section>
       <h2>Layers</h2>
+      <label class="slider" id="fall-row">Density falloff <output id="fall-out"></output><input type="range" id="fall" min="0" max="4" step="1"></label>
+      <p class="note" id="fall-note">Opacity from the density itself: 0 at the floor, 1 at the peak, to this power (higher: fainter edges). 0: opaque.</p>
       <label class="slider" id="dens-row">Density opacity <output id="dens-out"></output><input type="range" id="dens" min="0" max="1" step="0.05"></label>
       <label class="slider" id="back-row">Background opacity <output id="back-out">1.00</output><input type="range" id="back" min="0" max="1" step="0.05" value="1"></label>
     </section>
@@ -132,10 +133,10 @@ __NIIVUE__
       multiplanarLayout: 2, multiplanarEqualSize: true, heroImageFraction: 0,
       meshThicknessOn2D: D.slab || 4, isColorbar: false, dragMode: 1, crosshairWidth: 1,
       crosshairColor: [1, 0.3, 0.3, 1],
-      // nothing transparent: meshes are not seen through the volume, the 3-D view leaves the
-      // density out (the bundles are opaque surfaces there) and cuts the head open, lit, on
-      // the side facing the camera; tiles use all their space
-      meshXRay: 0, renderOverlayBlend: 0, clipPlaneColor: [0, 0, 0, 0], tileMargin: 0,
+      // meshes are not seen through the volume; the 3-D view cuts the head open, lit, on the
+      // side facing the camera, and ray-marches the density (and ROI) overlays into it; tiles
+      // use all their space
+      meshXRay: 0, renderOverlayBlend: 1, clipPlaneColor: [0, 0, 0, 0], tileMargin: 0,
       multiplanarPadPixels: 0, isOrientCube: false,
     });
     await nv.attachTo("gl");
@@ -228,66 +229,38 @@ __NIIVUE__
     const vIdx = (role, b) => D.volumes.findIndex((v) => v.role === role && (b === undefined || v.bundle === b));
     const mIdx = (role, b) => D.meshes.findIndex((m) => m.role === role && (b === undefined || m.bundle === b));
     const showMesh = (i, on) => { if (i >= 0) nv.setMeshProperty(nv.meshes[i].id, "visible", on); };
-    const dens = $("dens"), back = $("back");
-    const surfaces = {};
-    const refreshIso = () => { if (window.refreshIso) window.refreshIso(); };
-    // naive surface nets on a loaded volume (raw voxel order, its header's affine to mm)
-    const surfaceNets = (vol, level, name, rgb) => {
-      const img = vol.img, nx = vol.hdr.dims[1], ny = vol.hdr.dims[2], nz = vol.hdr.dims[3], A = vol.hdr.affine;
-      const lo = [nx, ny, nz], hi = [-1, -1, -1];
-      for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) {
-        const o = nx * (y + ny * z);
-        for (let x = 0; x < nx; x++) if (img[o + x] >= level) {
-          if (x < lo[0]) lo[0] = x; if (x > hi[0]) hi[0] = x; if (y < lo[1]) lo[1] = y; if (y > hi[1]) hi[1] = y;
-          if (z < lo[2]) lo[2] = z; if (z > hi[2]) hi[2] = z;
-        }
-      }
-      if (hi[0] < 0) return null;
-      const val = (x, y, z) => (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) ? 0 : img[x + nx * (y + ny * z)];
-      const c0 = [lo[0] - 1, lo[1] - 1, lo[2] - 1], cn = [hi[0] - lo[0] + 2, hi[1] - lo[1] + 2, hi[2] - lo[2] + 2];
-      const ci = (x, y, z) => (x - c0[0]) + cn[0] * ((y - c0[1]) + cn[1] * (z - c0[2]));
-      const vid = new Int32Array(cn[0] * cn[1] * cn[2]).fill(-1);
-      const C = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]];
-      const E = [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]];
-      const v = new Float32Array(8), pts = [], tris = [];
-      for (let z = c0[2]; z < c0[2] + cn[2]; z++) for (let y = c0[1]; y < c0[1] + cn[1]; y++) for (let x = c0[0]; x < c0[0] + cn[0]; x++) {
-        let mask = 0;
-        for (let k = 0; k < 8; k++) { v[k] = val(x + C[k][0], y + C[k][1], z + C[k][2]); if (v[k] >= level) mask |= 1 << k; }
-        if (mask === 0 || mask === 255) continue;
-        let sx = 0, sy = 0, sz = 0, n = 0;
-        for (const [a, b] of E) if (((mask >> a) & 1) !== ((mask >> b) & 1)) {
-          const t = (level - v[a]) / (v[b] - v[a]);
-          sx += C[a][0] + t * (C[b][0] - C[a][0]); sy += C[a][1] + t * (C[b][1] - C[a][1]); sz += C[a][2] + t * (C[b][2] - C[a][2]); n++;
-        }
-        const px = x + sx / n, py = y + sy / n, pz = z + sz / n;
-        vid[ci(x, y, z)] = pts.length / 3;
-        for (let r = 0; r < 3; r++) pts.push(A[r][0] * px + A[r][1] * py + A[r][2] * pz + A[r][3]);
-      }
-      // a quad across every grid edge the surface crosses, joining the four cells around it
-      const U = [[1, 2], [2, 0], [0, 1]];
-      for (let z = c0[2] + 1; z < c0[2] + cn[2]; z++) for (let y = c0[1] + 1; y < c0[1] + cn[1]; y++) for (let x = c0[0] + 1; x < c0[0] + cn[0]; x++) {
-        const p = [x, y, z], inside = val(x, y, z) >= level;
-        for (let d = 0; d < 3; d++) {
-          const q = [x, y, z]; q[d]++;
-          if (inside === (val(q[0], q[1], q[2]) >= level)) continue;
-          const [u, w] = U[d], cu = [...p], cw = [...p], cuw = [...p];
-          cu[u]--; cw[w]--; cuw[u]--; cuw[w]--;
-          const a = vid[ci(...p)], b = vid[ci(...cu)], c = vid[ci(...cuw)], e = vid[ci(...cw)];
-          if (a < 0 || b < 0 || c < 0 || e < 0) continue;
-          if (inside) tris.push(a, b, c, a, c, e); else tris.push(a, c, b, a, e, c);
-        }
-      }
-      if (!tris.length) return null;
-      return new NVMesh(Float32Array.from(pts), Uint32Array.from(tris), name, new Uint8Array([...rgb, 255]), 1.0, true, nv.gl);
+    // every NiiVue update rebuilds every overlay layer: change the volumes, then update once
+    const showVols = (idx, on) => {
+      idx = idx.filter((i) => i >= 0);
+      for (const i of idx) nv.volumes[i].opacity = on ? D.volumes[i].opacity : 0;
+      if (idx.length) nv.updateGLVolume();
     };
+    const dens = $("dens"), back = $("back");
     const densOn = {};
     const firstDensity = D.volumes.find((v) => v.role === "density");
     dens.value = firstDensity ? firstDensity.opacity : 0.55;
     $("dens-out").textContent = Number(dens.value).toFixed(2);
-    const applyDensity = () => {
-      for (const b of D.bundles) { const i = vIdx("density", b.name); if (i >= 0) nv.setOpacity(i, densOn[b.name] ? Number(dens.value) : 0); }
+    // NiiVue draws every overlay voxel above its threshold fully opaque, whatever the colour
+    // map's alpha; modulating a density by its own image sets its alpha from the density
+    // instead: ((v - cal_min) / (cal_max - cal_min)) ^ falloff.  A modulated volume ignores its
+    // opacity, so a hidden one is also unmodulated
+    let falloff = D.falloff || 0;
+    const applyDensity = () => {   // a density per bundle, or one for all ("all"): one update
+      D.volumes.forEach((vol, i) => {
+        if (vol.role !== "density") return;
+        const v = nv.volumes[i], on = !!densOn[vol.bundle];
+        v.opacity = on ? Number(dens.value) : 0;
+        v.modulationImage = on && falloff > 0 ? i : null;
+        v.modulateAlpha = on ? falloff : 0;
+      });
+      if (firstDensity) nv.updateGLVolume();
       $("dens-out").textContent = Number(dens.value).toFixed(2);
+      $("fall-out").textContent = falloff ? String(falloff) : "off (opaque)";
+      $("dens-row").hidden = !firstDensity || falloff > 0;     // no effect while modulated
     };
+    $("fall").value = falloff;
+    $("fall").addEventListener("input", (e) => { falloff = Number(e.target.value); applyDensity(); });
+    if (!firstDensity) { $("fall-row").hidden = true; $("fall-note").hidden = true; }
     dens.addEventListener("input", applyDensity);
     if (!firstDensity) $("dens-row").hidden = true;
 
@@ -300,26 +273,9 @@ __NIIVUE__
         const v = Number(df.value);
         D.volumes.forEach((vol, i) => { if (vol.role === "density") nv.volumes[i].cal_min = 1 + 254 * (v - le) / -le; });
         nv.updateGLVolume();
-        $("dfloor-out").textContent = sci(v);
-        refreshIso();
+        $("dfloor-out").textContent = sci(v);   // the 3-D render ray-marches from this level too
       };
       df.addEventListener("input", setD);
-      // opaque isosurface of each shown bundle's density at the slider's level, in its colour
-      const iso = $("iso");
-      iso.checked = !!D.isosurface;
-      let isoTimer = null;
-      window.refreshIso = () => { clearTimeout(isoTimer); isoTimer = setTimeout(() => {
-        const level = 1 + 254 * (Number(df.value) - le) / -le;
-        D.volumes.forEach((vol, i) => {
-          if (vol.role !== "density") return;
-          if (surfaces[vol.bundle]) { nv.removeMesh(surfaces[vol.bundle]); delete surfaces[vol.bundle]; }
-          if (!iso.checked || !densOn[vol.bundle]) return;
-          const b = D.bundles.find((x) => x.name === vol.bundle);
-          const m = surfaceNets(nv.volumes[i], level, `${vol.bundle}_surface`, b.rgb);
-          if (m) { surfaces[vol.bundle] = m; nv.addMesh(m); }
-        });
-      }, 200); };
-      iso.addEventListener("change", () => window.refreshIso());
       $("dfloor-out").textContent = sci(Number(df.value));
       $("thr-sec").hidden = false;
     } else $("dfloor-row").hidden = true;
@@ -336,20 +292,15 @@ __NIIVUE__
     back.addEventListener("input", () => { nv.setOpacity(bi, Number(back.value)); $("back-out").textContent = Number(back.value).toFixed(2); });
 
     const list = $("bundles");
-    for (const b of D.bundles) {
+    const row = (label, rgb, stat) => {
       const el = document.createElement("div");
       el.className = "bundle";
       const top = document.createElement("div");
       top.className = "top";
-      const sw = document.createElement("span"); sw.className = "swatch"; sw.style.background = `rgb(${b.rgb.join(",")})`;
-      const nm = document.createElement("span"); nm.className = "name"; nm.textContent = b.label;
-      top.append(sw, nm);
-      if (b.expected_streamlines != null) {
-        const st = document.createElement("span"); st.className = "stat";
-        st.textContent = `${b.expected_streamlines.toFixed(1)} streamlines`;
-        st.title = "expected bundle streamlines, one launched per seed voxel";
-        top.append(st);
-      }
+      const nm = document.createElement("span"); nm.className = "name"; nm.textContent = label;
+      if (rgb) { const sw = document.createElement("span"); sw.className = "swatch"; sw.style.background = `rgb(${rgb.join(",")})`; top.append(sw); }
+      top.append(nm);
+      if (stat) top.append(stat);
       const chips = document.createElement("div"); chips.className = "chips";
       const chip = (text, on, fn) => {
         const l = document.createElement("label"); l.className = "chip";
@@ -357,13 +308,30 @@ __NIIVUE__
         c.addEventListener("change", () => fn(c.checked));
         l.append(c, text); chips.append(l);
       };
-      if (vIdx("density", b.name) >= 0) { densOn[b.name] = true; chip("Density", true, (on) => { densOn[b.name] = on; applyDensity(); refreshIso(); }); }
+      el.append(top, chips); list.append(el);
+      return chip;
+    };
+    // a density / ROIs per bundle, or one of each for all of them ("all": the largest per voxel)
+    const layerChips = (chip, key) => {
+      if (vIdx("density", key) >= 0) { densOn[key] = true; chip("Density", true, (on) => { densOn[key] = on; applyDensity(); }); }
+      if (vIdx("include", key) >= 0 || vIdx("exclude", key) >= 0)
+        chip("ROIs", true, (on) => showVols([vIdx("include", key), vIdx("exclude", key)], on));
+    };
+    if (vIdx("density", "all") >= 0 || vIdx("include", "all") >= 0 || vIdx("exclude", "all") >= 0)
+      layerChips(row("All bundles (largest per voxel)", null, null), "all");
+    for (const b of D.bundles) {
+      let st = null;
+      if (b.expected_streamlines != null) {
+        st = document.createElement("span"); st.className = "stat";
+        st.textContent = `${b.expected_streamlines.toFixed(1)} streamlines`;
+        st.title = "expected bundle streamlines, one launched per seed voxel";
+      }
+      const chip = row(b.label, b.rgb, st);
+      layerChips(chip, b.name);
       if (mIdx("core", b.name) >= 0) chip("Core", true, (on) => showMesh(mIdx("core", b.name), on));
       if (hasGlyphs("glyphs", b.name)) chip("Glyphs", true, (on) => setGlyphs(`${b.name}_glyphs.mz3`, on));
-      if (mIdx("include", b.name) >= 0 || mIdx("exclude", b.name) >= 0)
-        chip("ROIs", true, (on) => { showMesh(mIdx("include", b.name), on); showMesh(mIdx("exclude", b.name), on); });
-      el.append(top, chips); list.append(el);
     }
+    applyDensity();
     if (hasGlyphs("glyphs")) {
       $("glyph-sec").hidden = false;
       $("dir-legend").hidden = D.glyph_color !== "direction";
@@ -400,7 +368,6 @@ __NIIVUE__
       if (window.followGlyphs) window.followGlyphs([d.mm[0], d.mm[1], d.mm[2]]);
     };
     nv.createOnLocationChange && nv.createOnLocationChange();
-    if (D.isosurface) refreshIso();
     window.nv = nv;   // for the console
   } catch (err) {
     status.hidden = false;
