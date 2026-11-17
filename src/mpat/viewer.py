@@ -10,7 +10,7 @@ or as a web page to open in any browser or share: ``mpat.viewer.save_html("bundl
 folder, ...)`` with the same options.
 
 Each bundle's density is shown on a log scale, from ``floor`` x its peak (faint) to its peak
-(bright), in one colour map for all (``turbo`` by default), its opacity falling off with
+(bright), in one colour map for all (``actc`` by default), its opacity falling off with
 the density -- in the 3-D view too, where NiiVue ray-marches the density volumes; its core
 (written by ``mpat.run``, computed here if missing) is drawn as a tube in its own colour,
 which tells the bundles apart.  ``glyphs=True`` adds the bundles'
@@ -109,8 +109,8 @@ def scene(folder, bundles=None, t1=None, floor=1e-3, show_density=True, density_
     t1               background image (default: the run's ``*_desc-mpat_dseg``)
     floor            faintest density shown, as a fraction of each bundle's peak
     show_density     overlay the density maps (False: cores only, on the background)
-    colormap         NiiVue colour map of every density ("turbo", default: a smoother jet with
-                     many distinguishable levels; "jet", "hot", ...).  With several bundles, their
+    colormap         NiiVue colour map of every density ("actc", default: black -> blue -> green
+                     -> yellow -> red; "turbo", "jet", "hot", ...).  With several bundles, their
                      densities are one volume: per voxel, the largest of them (each on its own
                      log scale), which NiiVue draws as one layer, not one per bundle (much
                      faster); so are their ROIs.  "bundle": a volume per bundle instead, each in a
@@ -209,7 +209,7 @@ def scene(folder, bundles=None, t1=None, floor=1e-3, show_density=True, density_
         img, dfull = dens[name]
         d = dfull[cut]                        # cropped; on the grid A
         cmap, rgb = PALETTE[i % len(PALETTE)]
-        cmap = cmap if colormap == "bundle" else (colormap or "turbo")
+        cmap = cmap if colormap == "bundle" else (colormap or "actc")
         meta = dict(name=name, label=name, rgb=list(rgb), colormap=cmap)
         if op.exists(f["prefix"] + "_desc-summary.json"):
             with open(f["prefix"] + "_desc-summary.json") as fh:

@@ -26,7 +26,7 @@ as you click or scroll. The slices start at the core's midpoint.
 | `glyph_color` | `"direction"` or `"bundle"` |
 | `floor` | the faintest density shown, as a fraction of each bundle's peak |
 | `falloff` | how the density's opacity drops off: 0 at `floor`, 1 at the peak, to this power (default 2; higher fades more; 0 opaque). NiiVue otherwise draws every overlay voxel above its threshold fully opaque, whatever the colour map; the page has a slider for it |
-| `colormap` | NiiVue colour map of every density, e.g. `"turbo"`, `"jet"`, `"viridis"`; default `turbo`; `"bundle"` gives one hue per bundle |
+| `colormap` | NiiVue colour map of every density, e.g. `"actc"`, `"turbo"`, `"hot"`; default `actc`; `"bundle"` gives one hue per bundle |
 | `show_density`, `density_opacity`, `core_radius` | display settings |
 
 ## A standalone web page

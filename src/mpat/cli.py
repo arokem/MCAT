@@ -56,7 +56,7 @@ def main(argv=None):
                         "(e.g. after updating mpat); give the same arguments as the run.  The collage and the all-bundles "
                         "page always show every bundle; --bundles limits which per-bundle pages are redone")
     p.add_argument("--colormap", metavar="NAME",
-                   help="NiiVue colour map of the density on every viewer page (default turbo), "
+                   help="NiiVue colour map of the density on every viewer page (default actc), "
                         "e.g. jet, hot, cubehelix; 'bundle': one hue per bundle")
     p.add_argument("--viz-rois", action="store_true",
                    help="viewer pages also show each bundle's include (green) / exclude (red) ROIs")
