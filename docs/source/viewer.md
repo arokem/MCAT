@@ -2,7 +2,8 @@
 
 `mpat.view` returns an [ipyniivue](https://github.com/niivue/ipyniivue) widget for Jupyter
 (JupyterLab, Notebook 7, VS Code, Voila). It shows a 3-D render and three slices. Each
-bundle's density is drawn on a log scale from 1e-3 of its peak, and its core as a tube:
+bundle's density is drawn on a log scale from 1e-3 of its peak (in the 3-D render, ray-marched
+by NiiVue's volume renderer), and its core as a tube:
 
 ```python
 import mpat
@@ -24,6 +25,8 @@ as you click or scroll. The slices start at the core's midpoint.
 | `glyph_norm=False` | size glyphs by visits instead of normalising each one |
 | `glyph_color` | `"direction"` or `"bundle"` |
 | `floor` | the faintest density shown, as a fraction of each bundle's peak |
+| `falloff` | how the density's opacity drops off: 0 at `floor`, 1 at the peak, to this power (default 2; higher fades more; 0 opaque). NiiVue otherwise draws every overlay voxel above its threshold fully opaque, whatever the colour map; the page has a slider for it |
+| `colormap` | NiiVue colour map of every density, e.g. `"turbo"`, `"jet"`, `"viridis"`; default `turbo`; `"bundle"` gives one hue per bundle |
 | `show_density`, `density_opacity`, `core_radius` | display settings |
 
 ## A standalone web page

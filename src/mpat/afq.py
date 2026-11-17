@@ -444,23 +444,68 @@ def write_rois(afq, bundles=None, moments=False, synthseg_thalamus=True, no_midl
                      bundles=[re.sub(r"[^A-Za-z0-9]", "", n) for n in run_names], rois=True)
 
 
-def visualize(out, stem, bundles, fodf=None, t1=None, rois=False):
+def write_viz(afq, bundles=None, moments=False, out_dir=None, rois=False, colormap=None):
+    """Rewrite a finished run's figures (the collage and the viewer pages, as ``run(viz=True)``
+    writes them) from its outputs on disk, solving nothing -- e.g. after a viewer update.
+    The collage and the all-bundles page always show every bundle with outputs; ``bundles``
+    (pyAFQ names) limits which per-bundle pages are rewritten (default: all).  colormap: see
+    visualize.  Returns the folder."""
+    out = mpat_dir(afq, moments, out_dir)
+    stem = str(out / Path(afq.kwargs["base_fname"]).name)
+    every = bundles_on_disk(afq, out)
+    if not every:
+        raise ValueError(f"no MPAT outputs under {out}")
+    names = every
+    if bundles:
+        want = [re.sub(r"[^A-Za-z0-9]", "", n) for n in bundles]
+        names = [n for n in want if n in every]
+        if len(names) < len(want):
+            log.warning("no run outputs for %s", [n for n in want if n not in every])
+    sh_path = afq.export(f"{afq.export('tracking_params')['odf_model'].lower()}_params")
+    try:
+        t1 = afq.export("t1_masked")
+    except Exception:  # noqa: BLE001 -- the collage falls back to the tissue labels
+        t1 = None
+    visualize(out, stem, names, sh_path, t1=t1, rois=rois, colormap=colormap, all_bundles=every)
+    return out
+
+
+def bundles_on_disk(afq, out):
+    """Every bundle with MPAT outputs under ``out`` (file names, e.g. LeftArcuate): in the
+    bundle dictionary's order, then any others."""
+    from .core import bundle_files
+
+    done = bundle_files(out)
+    try:
+        order = [re.sub(r"[^A-Za-z0-9]", "", n) for n in afq.export("bundle_dict")]
+    except Exception:  # noqa: BLE001
+        order = []
+    return [n for n in order if n in done] + sorted(set(done) - set(order))
+
+
+def visualize(out, stem, bundles, fodf=None, t1=None, rois=False, colormap=None, all_bundles=None):
     """The run's figures: a MIP collage of the bundles, a viewer page with all of them
     (densities and cores), and a page per bundle with its glyphs (and the fODF, if given);
-    ``rois``: the pages also show each bundle's include / exclude ROIs.
+    ``rois``: the pages also show each bundle's include / exclude ROIs.  ``colormap``: NiiVue
+    colour map of the density on every page (default turbo; e.g. "jet", "hot"; "bundle": one
+    hue per bundle).  ``all_bundles``: the
+    bundles of the collage and the all-bundles page (default ``bundles``); per-bundle pages are
+    written for ``bundles``.
     Failures are logged, not raised: the bundles are already on disk."""
     from .collage import write_collage
     from .core import bundle_files
     from .viewer import save_html
 
-    jobs = [("collage", lambda: write_collage(out, f"{stem}_desc-mpat_collage.png", bundles, t1=t1)),
-            ("viewer", lambda: save_html(f"{stem}_desc-mpat_view.html", out, bundles=bundles, rois=rois))]
+    every = list(all_bundles or bundles)
+    jobs = [("collage", lambda: write_collage(out, f"{stem}_desc-mpat_collage.png", every, t1=t1)),
+            ("viewer", lambda: save_html(f"{stem}_desc-mpat_view.html", out, bundles=every, rois=rois,
+                                         colormap=colormap))]
     files = bundle_files(out)
     for b in bundles:
         if b in files:   # glyphs from 1e-2 of the peak (the slider can raise it); keeps pages small
             jobs.append((f"{b} viewer", lambda b=b: save_html(
                 f"{files[b]['prefix']}_desc-view.html", out, bundles=[b], glyphs=True, fodf=fodf,
-                glyph_range=1e-2, rois=rois)))
+                glyph_range=1e-2, rois=rois, colormap=colormap)))
     for what, job in jobs:
         try:
             log.info("%s: %s", what, job())
@@ -598,7 +643,7 @@ def _bytes(x):
 def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angle=35.0, double_odf=True,
         cores=True, viz=True, synthseg_thalamus=True, max_length=250.0, viz_rois=False,
         no_midline=(), midline_tol=None, out_dir=None, verbose=False, fornix=True, flux=False,
-        fixels=False):
+        fixels=False, viz_colormap=None):
     """Segment pyAFQ's bundles with MPAT.
 
     afq         ``ParticipantAFQ`` or ``GroupAFQ`` (every participant in turn)
@@ -614,9 +659,12 @@ def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angl
                 first-order probabilistic tracker)
     cores       also write each bundle's ridge-path core (mpat.core)
     viz         also write a MIP collage of all bundles (PNG), a viewer page of all bundles
-                (densities and cores), and one page per bundle with its visitation-ODF glyphs
+                (densities and cores; both of every bundle in the output folder, so a run of
+                some bundles keeps the others), and one page per bundle with its visitation-ODF glyphs
                 and the fODF (mpat.viewer.save_html).  Pages load NiiVue from a CDN.
     viz_rois    the viewer pages also show each bundle's include / exclude ROIs
+    viz_colormap  NiiVue colour map of the density on the per-bundle viewer pages (default
+                turbo; e.g. "jet", "hot"), the all-bundles page included ("bundle": one hue per bundle)
     no_midline  bundle names whose cross_midline=False is ignored (no other-hemisphere exclusion)
     midline_tol mm past the midline the corticospinal tracts may go before the other hemisphere
                 is excluded (default: their rule, 10; 0: a strict cut); every other one-sided bundle
@@ -651,7 +699,7 @@ def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angl
     if hasattr(afq, "pAFQ_list"):
         kw = dict(cores=cores, viz=viz, synthseg_thalamus=synthseg_thalamus, max_length=max_length,
                   viz_rois=viz_rois, no_midline=no_midline, midline_tol=midline_tol,
-                  verbose=verbose, fornix=fornix, flux=flux, fixels=fixels)
+                  verbose=verbose, fornix=fornix, flux=flux, fixels=fixels, viz_colormap=viz_colormap)
         return {f"sub-{s}_ses-{t}": run(p, n_proc, max_mem, bundles, moments, tol, angle, double_odf, **kw,
                                         out_dir=out_dir and str(Path(out_dir) / f"sub-{s}" / f"ses-{t}"))
                 for s, t, p in zip(afq.valid_sub_list, afq.valid_ses_list, afq.pAFQ_list)}
@@ -810,7 +858,8 @@ def run(afq, n_proc, max_mem="auto", bundles=None, moments=False, tol=1e-6, angl
             t1 = afq.export("t1_masked")
         except Exception:  # noqa: BLE001 -- the collage falls back to the tissue labels
             t1 = None
-        visualize(out, stem, [re.sub(r"[^A-Za-z0-9]", "", n) for n in results], sh_path, t1=t1, rois=viz_rois)
+        visualize(out, stem, [re.sub(r"[^A-Za-z0-9]", "", n) for n in results], sh_path, t1=t1, rois=viz_rois,
+                  colormap=viz_colormap, all_bundles=bundles_on_disk(afq, out))
         clock.add("viz", time.perf_counter() - t_viz)
     clock.report("MPAT time per stage", time.time() - t0)
     log.info("MPAT: %d bundles in %.0fs -> %s", len(results), time.time() - t0, out)
