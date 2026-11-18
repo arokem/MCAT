@@ -25,6 +25,11 @@ docs = [
     "matplotlib>=3.8", "imageio-ffmpeg",
 ]
 
+all = [
+    "mpat[test]",
+    "mpat[docs]",
+]
+
 [project.scripts]
 mpat = "mpat.cli:main"
 
