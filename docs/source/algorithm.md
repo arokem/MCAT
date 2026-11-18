@@ -11,7 +11,7 @@ This page walks through the method step by step.
 The figures and animations run MPAT's own code (`mpat.Chain`, `mpat.segment_bundles`,
 `mpat.bundle_core`, ...) on a small synthetic brain, the *phantom* in {numref}`fig-phantom`.
 It is one slice of 2 mm voxels with two crossing bundles: a U-shaped **arc** and a straight
-**stem**. The scripts are in [`docs/animations/`](https://github.com/36000/MPAT/tree/main/docs/animations)
+**stem**. The scripts are in [`docs/animations/`](https://github.com/rokemlab/MPAT/tree/main/docs/animations)
 and are re-run whenever MPAT's source changes.
 ```
 

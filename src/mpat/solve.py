@@ -149,7 +149,7 @@ def solve_series(mul, x0, mask, tol, max_iter, what, ncomp=1, verbose=False, acc
     ``accel``: False (default), True / "mr" (invariant-preserving Periodic Minimal Residual
     extrapolation), or "aitken" (scalar Aitken delta-squared extrapolation).
     ``on_step``: optional callback ``on_step(it, res, total, term)`` invoked after each iteration
-        (``term``: that iteration's term of the series, i.e. the current wavefront).
+    (``term``: that iteration's term of the series, i.e. the current wavefront).
     Returns (total, info)."""
     t_start = time.perf_counter()
     t_mul = t_acc = 0.0

@@ -91,7 +91,7 @@ html_context = {"default_mode": "light"}
 html_sidebars = {"**": []}          # navigation lives in the header; pages use the full width
 html_show_sourcelink = False
 
-linkcheck_ignore = [r"https://github\.com/(rokemlab|36000)/MPAT.*"]
+linkcheck_ignore = [r"https://github\.com/rokemlab/MPAT.*"]
 
 # ------------------------------------------------------------------ build environment
 # the `mpat` console script lives next to the interpreter running Sphinx (virtualenvs)
