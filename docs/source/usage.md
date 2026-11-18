@@ -29,7 +29,9 @@ Any pyAFQ setting goes on the `ParticipantAFQ`, for example:
 ```{note}
 MPAT uses pyAFQ's ROI-based bundle definitions: include, exclude, start and end ROIs, and
 whether a bundle may cross the midline. pyAFQ's streamline-based criteria (curvature, length,
-cleaning) have no counterpart in an expectation and are not applied.
+cleaning) have no counterpart in an expectation and are not applied. {doc}`bundles` says what
+each kind of ROI means for a streamline, what MPAT adds to pyAFQ's definitions, and how to
+define a bundle of your own.
 ```
 
 ## From the command line

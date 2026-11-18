@@ -11,7 +11,7 @@ This page walks through the method step by step.
 The figures and animations run MPAT's own code (`mpat.Chain`, `mpat.segment_bundles`,
 `mpat.bundle_core`, ...) on a small synthetic brain, the *phantom* in {numref}`fig-phantom`.
 It is one slice of 2 mm voxels with two crossing bundles: a U-shaped **arc** and a straight
-**stem**. The scripts are in [`docs/animations/`](https://github.com/36000/MPAT/tree/main/docs/animations)
+**stem**. The scripts are in [`docs/animations/`](https://github.com/rokemlab/MPAT/tree/main/docs/animations)
 and are re-run whenever MPAT's source changes.
 ```
 
@@ -266,7 +266,8 @@ gives the bundle's density.
 ## 10. ROIs
 
 pyAFQ's bundle definitions are turned into requirements on the two halves of a streamline
-(`mpat.afq.bundle_specs`).
+(`mpat.afq.bundle_specs`). What each kind of ROI means in practice, and MPAT's additions to
+pyAFQ's definitions, are in {doc}`bundles`.
 
 **Exclude ROIs** make states *taboo*. A walker that enters a taboo voxel is removed from the
 column; in the solves, that is a diagonal mask $M$:

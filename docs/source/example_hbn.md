@@ -8,7 +8,7 @@ up to the `ParticipantAFQ` object. From there, MPAT replaces tractography and bu
 recognition.
 
 The whole example is one script,
-[`examples/hbn_participant.py`](https://github.com/36000/MPAT/blob/main/examples/hbn_participant.py):
+[`examples/hbn_participant.py`](https://github.com/rokemlab/MPAT/blob/main/examples/hbn_participant.py):
 
 ```bash
 pip install "pyAFQ[aws]"          # boto3, to download HBN-POD2 from its public S3 bucket

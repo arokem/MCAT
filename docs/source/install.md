@@ -6,7 +6,7 @@ Rust toolchain ([rustup.rs](https://rustup.rs)) and `maturin`:
 
 ```bash
 pip install maturin
-pip install "mpat-tractography[viewer] @ git+https://github.com/36000/MPAT.git"
+pip install "mpat-tractography[viewer] @ git+https://github.com/rokemlab/MPAT.git"
 ```
 
 Extras:
