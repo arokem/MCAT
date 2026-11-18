@@ -1,5 +1,8 @@
 # MPAT: Markov probabilistic absorbing tractography
 
+<img width="396" height="302" alt="homepage" src="https://github.com/user-attachments/assets/c84adcfe-ff9d-49c3-8d08-58c28dbcd6f5" />
+
+
 [![docs](https://github.com/rokemlab/MPAT/actions/workflows/docs.yml/badge.svg)](https://rokemlab.github.io/MPAT/)
 
 **Documentation:** <https://rokemlab.github.io/MPAT/>, including [how the method works](https://rokemlab.github.io/MPAT/algorithm.html), with animations.
