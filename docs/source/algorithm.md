@@ -156,7 +156,7 @@ scatter $Q^\top x$, and backward steps gather $Qx$ (`mpat.chain.Chain`).
 Order the states as white-matter (transient) states and absorbing voxels. One step of the
 chain is
 $$
-\begin{pmatrix} Q & R \\ 0 & I \end{pmatrix},
+\begin{pmatrix} I & 0 \\ Q & R \end{pmatrix},
 $$
 with $Q$ the transient-to-transient block and $R$ the transient-to-absorbing block. Each
 row of $[\,Q\;R\,]$ plus the row's death probability sums to 1. Mass $x$ spread over the
