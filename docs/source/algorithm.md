@@ -55,7 +55,7 @@ Each voxel inside the mask gets one of four roles, chosen as pyAFQ's tracker cho
 | white matter | WM PVE > 0.4 | **transient**: walkers move here |
 | grey matter | otherwise, where GM PVE ≥ CSF PVE | **absorbing**, a valid end |
 | CSF | otherwise | **blocked**: never entered; a hop into CSF has probability 0 |
-| edge | the mask's inner boundary | **absorbing**, a valid end (fibres leaving the field of view) |
+| edge | the mask's inner boundary | **absorbing**, a valid end (fibres leaving the field of view; for example, in the corticospinal tract) |
 
 A walker on its way through white matter remembers which way it is going. A state of the
 chain is therefore a pair
